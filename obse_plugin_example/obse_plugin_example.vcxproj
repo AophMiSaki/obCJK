@@ -1,0 +1,192 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|Win32">
+      <Configuration>Debug</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|Win32">
+      <Configuration>Release</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{D4DDA734-7E93-4581-8F82-32BB738F69FE}</ProjectGuid>
+    <RootNamespace>obCJK</RootNamespace>
+    <SccProjectName>
+    </SccProjectName>
+    <SccLocalPath>
+    </SccLocalPath>
+    <SccProvider>
+    </SccProvider>
+    <Keyword>Win32Proj</Keyword>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+    <ProjectName>obCJK</ProjectName>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>MultiByte</CharacterSet>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>MultiByte</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings">
+  </ImportGroup>
+  <ImportGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup>
+    <_ProjectFileVersion>16.0.29511.113</_ProjectFileVersion>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+    <OutDir>$(SolutionDir)$(Configuration)\</OutDir>
+    <IntDir>$(Configuration)\</IntDir>
+    <LinkIncremental>true</LinkIncremental>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <OutDir>$(SolutionDir)$(Configuration)\</OutDir>
+    <IntDir>$(Configuration)\</IntDir>
+    <LinkIncremental>false</LinkIncremental>
+    <IncludePath>C:\Program Files %28x86%29\Microsoft DirectX SDK %28June 2010%29\Include;$(IncludePath)</IncludePath>
+    <LibraryPath>C:\Program Files %28x86%29\Microsoft DirectX SDK %28June 2010%29\Lib\x86;$(LibraryPath)</LibraryPath>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+    <ClCompile>
+      <Optimization>Disabled</Optimization>
+      <AdditionalIncludeDirectories>$(SolutionDir);$(SolutionDir)\..;$(SolutionDir)\..\obse\obse;$(SolutionDir)\..\obse\;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>WIN32;_DEBUG;_WINDOWS;_USRDLL;OBLIVION_VERSION=0x010201A0;OBLIVION;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <MinimalRebuild>false</MinimalRebuild>
+      <BasicRuntimeChecks>EnableFastChecks</BasicRuntimeChecks>
+      <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
+      <PrecompiledHeader />
+      <WarningLevel>Level3</WarningLevel>
+      <DebugInformationFormat>EditAndContinue</DebugInformationFormat>
+      <ForcedIncludeFiles>obse_common/obse_prefix.h;StdAfx.h;%(ForcedIncludeFiles)</ForcedIncludeFiles>
+      <LanguageStandard>stdcpplatest</LanguageStandard>
+      <LanguageStandard_C>stdc17</LanguageStandard_C>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <Link>
+      <ModuleDefinitionFile>exports.def</ModuleDefinitionFile>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <SubSystem>Windows</SubSystem>
+      <TargetMachine>MachineX86</TargetMachine>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <ClCompile>
+      <AdditionalIncludeDirectories>$(SolutionDir);$(SolutionDir)\..;$(SolutionDir)\..\obse\obse;$(SolutionDir)\..\obse\;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>WIN32;NDEBUG;_WINDOWS;_USRDLL;OBLIVION_VERSION=0x010201A0;OBLIVION;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+      <PrecompiledHeader />
+      <WarningLevel>Level3</WarningLevel>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+      <ForcedIncludeFiles>obse_common/obse_prefix.h;StdAfx.h;%(ForcedIncludeFiles)</ForcedIncludeFiles>
+      <LanguageStandard>stdcpplatest</LanguageStandard>
+      <LanguageStandard_C>stdc17</LanguageStandard_C>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <Link>
+      <ModuleDefinitionFile>exports.def</ModuleDefinitionFile>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <SubSystem>Windows</SubSystem>
+      <OptimizeReferences>true</OptimizeReferences>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <TargetMachine>MachineX86</TargetMachine>
+      <AdditionalDependencies>d3d9.lib;d3dx9.lib;winmm.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\common\common.vcxproj">
+      <Project>{20c6411c-596f-4b85-be4e-8bc91f59d8a6}</Project>
+      <CopyLocalSatelliteAssemblies>true</CopyLocalSatelliteAssemblies>
+      <ReferenceOutputAssembly>true</ReferenceOutputAssembly>
+    </ProjectReference>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="..\obse\obse\GameActorValues.cpp" />
+    <ClCompile Include="..\obse\obse\GameAPI.cpp" />
+    <ClCompile Include="..\obse\obse\GameMenus.cpp" />
+    <ClCompile Include="..\obse\obse\GameTiles.cpp" />
+    <ClCompile Include="..\obse\obse\GameBSExtraData.cpp" />
+    <ClCompile Include="..\obse\obse\GameData.cpp" />
+    <ClCompile Include="..\obse\obse\GameExtraData.cpp" />
+    <ClCompile Include="..\obse\obse\GameForms.cpp" />
+    <ClCompile Include="..\obse\obse\GameObjects.cpp" />
+    <ClCompile Include="..\obse\obse\GameTasks.cpp" />
+    <ClCompile Include="..\obse\obse\GameTypes.cpp" />
+    <ClCompile Include="..\obse\obse\NiAPI.cpp" />
+    <ClCompile Include="..\obse\obse\NiNodes.cpp" />
+    <ClCompile Include="..\obse\obse\NiRTTI.cpp" />
+    <ClCompile Include="..\obse\obse\Script.cpp" />
+    <ClCompile Include="..\obse\obse\Utilities.cpp" />
+    <ClCompile Include="..\obse\obse_common\SafeWrite.cpp" />
+    <ClCompile Include="dllmain.cpp" />
+    <ClCompile Include="main.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\obse\obse\GameActorValues.h" />
+    <ClInclude Include="..\obse\obse\GameAPI.h" />
+    <ClInclude Include="..\obse\obse\GameMenus.h" />
+    <ClInclude Include="..\obse\obse\GameTiles.h" />
+    <ClInclude Include="..\obse\obse\GameBSExtraData.h" />
+    <ClInclude Include="..\obse\obse\GameData.h" />
+    <ClInclude Include="..\obse\obse\GameExtraData.h" />
+    <ClInclude Include="..\obse\obse\GameForms.h" />
+    <ClInclude Include="..\obse\obse\GameObjects.h" />
+    <ClInclude Include="..\obse\obse\GameTasks.h" />
+    <ClInclude Include="..\obse\obse\GameTypes.h" />
+    <ClInclude Include="..\obse\obse\NiAPI.h" />
+    <ClInclude Include="..\obse\obse\NiNodes.h" />
+    <ClInclude Include="..\obse\obse\NiRTTI.h" />
+    <ClInclude Include="..\obse\obse\ParamInfos.h" />
+    <ClInclude Include="..\obse\obse\PluginAPI.h" />
+    <ClInclude Include="..\obse\obse\Script.h" />
+    <ClInclude Include="..\obse\obse\Utilities.h" />
+    <ClInclude Include="..\obse\obse_common\SafeWrite.h" />
+    <ClInclude Include="include\obCJK_Encoding.h" />
+    <ClInclude Include="include\obcjk_globalVariable.h" />
+    <ClInclude Include="include\obCJK_Gamepad.h" />
+    <ClInclude Include="include\obCJK_GlyphAtlas.h" />
+    <ClInclude Include="include\obCJK_GlyphHook.h" />
+    <ClInclude Include="include\obCJK_GlyphHook_UTF8.h" />
+    <ClInclude Include="include\obCJK_HookUtil.h" />
+    <ClInclude Include="include\obCJK_LineBreakHook.h" />
+    <ClInclude Include="include\obCJK_IME_In.h" />
+    <ClInclude Include="include\obCJK_IME_Out.h" />
+    <ClInclude Include="include\obCJK_LineBreakHook_UTF8.h" />
+    <ClInclude Include="include\obCJK_LineBreakRule.h" />
+    <ClInclude Include="include\obCJK_LineBreakRule_UTF8.h" />
+    <ClInclude Include="include\obCJK_CreateFileWShim.h" />
+    <ClInclude Include="include\obCJK_DeleteFileWShim.h" />
+    <ClInclude Include="include\obCJK_LootMenuTrailByteFixHook.h" />
+    <ClInclude Include="include\obCJK_MenuQueDelimHook.h" />
+    <ClInclude Include="include\obCJK_NorthernUICompat.h" />
+    <ClInclude Include="include\obCJK_Path.h" />
+    <ClInclude Include="include\obCJK_SaveDiag.h" />
+    <ClInclude Include="include\obCJK_SaveListFindShim.h" />
+    <ClInclude Include="include\obCJK_SaveNameTruncateHook.h" />
+    <ClInclude Include="include\obCJK_SaveReturnFixHook.h" />
+    <ClInclude Include="include\obCJK_TexSwap.h" />
+    <ClInclude Include="include\obCJK_TexUpload.h" />
+    <ClInclude Include="include\obCJK_WordWrapHook.h" />
+    <ClInclude Include="include\obCJK_WordWrapHook_UTF8.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\obse\obse\GameRTTI_1_2_416.inl" />
+    <None Include="exports.def" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets">
+  </ImportGroup>
+</Project>

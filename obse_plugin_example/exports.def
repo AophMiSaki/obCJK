@@ -1,0 +1,4 @@
+LIBRARY	"obCJK"
+EXPORTS
+OBSEPlugin_Query
+OBSEPlugin_Load
