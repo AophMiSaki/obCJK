@@ -226,6 +226,12 @@ _FALLBACK_UI_TEXT: dict[str, str] = {
     "northernui_opt_official": "原NorthernUI",
     "northernui_opt_patched": "新NorthernUI",
     "slot_reserved_desc": "保留（尚未開放）",
+    "outline_lbl": "描邊/陰影：",
+    "outline_mode_off": "關",
+    "outline_mode_shadow": "陰影",
+    "outline_mode_outline": "描邊",
+    "outline_size_lbl": "邊寬",
+    "outline_alpha_lbl": "邊濃度",
 }
 _FALLBACK_THICKNESS_OPTS = [("300 細", 300), ("400 標準", 400), ("500 適中", 500), ("700 粗體", 700)]
 _FALLBACK_CONTRAST_OPTS  = [("弱", -1), ("普通", 0), ("強烈", 1)]
@@ -921,6 +927,45 @@ class ModeTab(ttk.Frame):
             if i == 0:
                 self._half_widgets.append(it_box)
 
+        # 描邊/陰影（slot 層級，半角全角共用）：ini 鍵 <prefix>_OutlineMode
+        # (0關/1陰影/2描邊)、_OutlineSize(1..3)、_OutlineAlpha(0..100)。
+        ol_frame = ttk.Frame(self)
+        ol_frame.grid(row=6, column=0, columnspan=20, sticky="w", pady=(8, 0))
+        self._ol_labels = [tr("outline_mode_off"), tr("outline_mode_shadow"),
+                           tr("outline_mode_outline")]
+
+        def _ol_int(key, default, lo, hi):
+            try:
+                return max(lo, min(hi, int(_get(f"{prefix}_{key}", str(default)))))
+            except ValueError:
+                return default
+
+        self._ol_mode_var = tk.StringVar(
+            value=self._ol_labels[_ol_int("OutlineMode", 0, 0, 2)])
+        self._ol_size_var = tk.StringVar(value=str(_ol_int("OutlineSize", 1, 1, 3)))
+        self._ol_alpha_var = tk.IntVar(value=_ol_int("OutlineAlpha", 100, 0, 100))
+
+        ttk.Label(ol_frame, text=tr("outline_lbl"), anchor="e").grid(
+            row=0, column=0, padx=(4, 0))
+        ttk.Combobox(ol_frame, textvariable=self._ol_mode_var, values=self._ol_labels,
+                     state="readonly", width=_combo_width(self._ol_labels)
+                     ).grid(row=0, column=1, padx=(0, 8))
+        ttk.Label(ol_frame, text=tr("outline_size_lbl"), anchor="e").grid(
+            row=0, column=2, padx=(4, 0))
+        ttk.Spinbox(ol_frame, textvariable=self._ol_size_var, from_=1, to=3,
+                    width=4).grid(row=0, column=3, padx=(0, 8))
+        ttk.Label(ol_frame, text=tr("outline_alpha_lbl"), anchor="e").grid(
+            row=0, column=4, padx=(4, 0))
+        ol_alpha_pct = ttk.Label(ol_frame, text=f"{self._ol_alpha_var.get()}%", width=5)
+
+        def _on_ol_alpha(raw):
+            ol_alpha_pct.config(text=f"{round(float(raw))}%")
+
+        ttk.Scale(ol_frame, from_=0, to=100, orient="horizontal",
+                  variable=self._ol_alpha_var, length=120, command=_on_ol_alpha
+                  ).grid(row=0, column=5, padx=(0, 4))
+        ol_alpha_pct.grid(row=0, column=6)
+
         self.columnconfigure(14, weight=1)
         self._on_native_toggle()
 
@@ -932,6 +977,8 @@ class ModeTab(ttk.Frame):
             for pvs in self._pvars:
                 for sv in pvs.values():
                     sv.trace_add("write", _fire)
+            for ov in (self._ol_mode_var, self._ol_size_var, self._ol_alpha_var):
+                ov.trace_add("write", _fire)
 
     def _on_native_toggle(self) -> None:
         """勾選「遊戲原生字型」時，把半形這一列所有欄位灰掉停用——這個SLOT的
@@ -981,7 +1028,24 @@ class ModeTab(ttk.Frame):
             "weight":   self._th_by_lbl.get(pvars[5].get(), 400) if 5 in pvars else 400,
             "contrast": self._co_by_lbl.get(pvars[6].get(), 0) if 6 in pvars else 0,
             "italic":   bool(pvars[7].get()) if 7 in pvars else False,
+            **self._get_outline(),
         }
+
+    def _get_outline(self) -> dict:
+        """描邊/陰影參數：mode 0關/1陰影/2描邊，size 1..3，alpha 0..100。"""
+        try:
+            mode = self._ol_labels.index(self._ol_mode_var.get())
+        except ValueError:
+            mode = 0
+        try:
+            size = max(1, min(3, int(self._ol_size_var.get())))
+        except (ValueError, tk.TclError):
+            size = 1
+        try:
+            alpha = max(0, min(100, int(self._ol_alpha_var.get())))
+        except (ValueError, tk.TclError):
+            alpha = 100
+        return {"outline_mode": mode, "outline_size": size, "outline_alpha": alpha}
 
     def _get_nums(self, idx: int) -> list[int]:
         pvars = self._pvars[idx]
@@ -1005,7 +1069,11 @@ class ModeTab(ttk.Frame):
         return nums
 
     def collect(self) -> dict[str, str]:
+        ol = self._get_outline()
         return {
+            f"{self._prefix}_OutlineMode":  str(ol["outline_mode"]),
+            f"{self._prefix}_OutlineSize":  str(ol["outline_size"]),
+            f"{self._prefix}_OutlineAlpha": str(ol["outline_alpha"]),
             f"{self._prefix}_1": build_font_param(
                 self._name_vars[0].get().strip(), self._get_nums(0)),
             f"{self._prefix}_2": build_font_param(
@@ -2231,7 +2299,7 @@ class App(tk.Tk):
         # height=260（原120）：同上，固定高度捲動Canvas不會動態撐開，直接加大
         # 這裡的基礎高度數字，避免CJK預覽文字被裁掉。
         self._preview_canvas = tk.Canvas(preview_lf, bg="white",
-                                         bd=0, highlightthickness=0, height=260)
+                                         bd=0, highlightthickness=0, height=200)
         self._preview_canvas.pack(fill="both", expand=True, padx=4, pady=4)
 
         disp_frame = ttk.Frame(font_frame_)
@@ -2793,6 +2861,22 @@ class App(tk.Tk):
         text_level = round(brightness + (255 - brightness) * (bg_pct / 100))
         color      = f"#{text_level:02x}{text_level:02x}{text_level:02x}"
 
+        # 描邊/陰影：Tk canvas 文字無 alpha，黑邊色用「黑色以邊濃度疊在
+        # 背景色上」的實色近似（背景為 box_color 或畫布白）。陰影＝黑字偏移
+        # (size,size) 一份；描邊＝黑字在 1..size 距離的 8 個方向各一份。
+        ol_mode  = params["outline_mode"]
+        ol_size  = params["outline_size"]
+        ol_level = round((bg_level if bg_pct > 0 else 255) * (1 - params["outline_alpha"] / 100))
+        ol_color = f"#{ol_level:02x}{ol_level:02x}{ol_level:02x}"
+        ol_offsets = []
+        if ol_mode == 1:
+            ol_offsets = [(ol_size, ol_size)]
+        elif ol_mode == 2:
+            ol_offsets = [(dx * r, dy * r)
+                          for r in range(1, ol_size + 1)
+                          for dx in (-1, 0, 1) for dy in (-1, 0, 1)
+                          if dx or dy]
+
         self._preview_canvas.delete("all")
         try:
             fnt    = tkfont.Font(family=font_name, size=-px_size, weight=tk_weight, slant=tk_slant)
@@ -2815,6 +2899,11 @@ class App(tk.Tk):
                         self._preview_canvas.create_rectangle(
                             x, y, x + adv, y + line_h, fill=box_color, outline=""
                         )
+                    if not ch.isspace():
+                        for ox, oy in ol_offsets:
+                            self._preview_canvas.create_text(
+                                x + ox, y + oy, text=ch, font=fnt, fill=ol_color, anchor="nw"
+                            )
                     self._preview_canvas.create_text(
                         x, y, text=ch, font=fnt, fill=color, anchor="nw"
                     )

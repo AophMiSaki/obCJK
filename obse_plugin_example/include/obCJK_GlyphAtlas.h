@@ -315,6 +315,10 @@ struct ObCJKFontSlot {
                                    // Derivation/confirmation (descender ink correctly hangs
                                    // below baseline, proving baseline — not cell bottom —
                                    // is the true zero point).
+    int               outlineMode;  // FontParam<N>_OutlineMode: 0=off, 1=shadow (right/bottom), 2=outline (all sides).
+                                    // Slot-level key shared by the ASCII and CJK slots of the same engineID.
+    int               outlineSize;  // FontParam<N>_OutlineSize (ini px 1..3) scaled by ObCJKGetRenderScale(), min 1 when mode!=0.
+    int               outlineAlpha; // FontParam<N>_OutlineAlpha, 0..100 (black layer opacity, not scaled).
     ObCJKGlyphEntry** glyphs;   // VirtualAlloc'd on first use, 0x10000 entries
     ObCJKAtlasPage*   pages[kObCJKAtlasMaxPages];
     int               pageCount;
@@ -429,6 +433,67 @@ static void ObCJKCompositeGlyphPixel(BYTE v, int bgOpacityPct, BYTE* outR, BYTE*
     }
     *outR = *outG = *outB = color;
     *outA = alpha;
+}
+
+// [2026-10-03 18:30] Outline/shadow: padding in px the black layer adds around
+// the ink box. Shadow = right/bottom only, outline = all four sides. All zero
+// when the slot has no outline configured.
+static void ObCJKOutlinePads(const ObCJKFontSlot* slot, int* padL, int* padT, int* padR, int* padB)
+{
+    *padL = *padT = *padR = *padB = 0;
+    if (!slot || slot->outlineMode == 0) return;
+    int s = slot->outlineSize;
+    if (slot->outlineMode == 1) { *padR = *padB = s; }
+    else                        { *padL = *padT = *padR = *padB = s; }
+}
+
+// Black-layer coverage (0..255) at ink-space position (x,y), where `ink` is the
+// w*h density/contrast-processed coverage buffer (out-of-range = 0).
+// Shadow: the ink shifted (size,size) toward right/bottom.
+// Outline: max coverage over the pixel itself and the 8 directions at
+// distance 1..size (same sample set obCJK_iniEdit.py's preview draws).
+static BYTE ObCJKOutlineCoverage(const BYTE* ink, int w, int h, int x, int y, int mode, int size)
+{
+    int best = 0;
+    if (mode == 1) {
+        int sx = x - size, sy = y - size;
+        if (sx >= 0 && sx < w && sy >= 0 && sy < h) best = ink[sy * w + sx];
+        return (BYTE)best;
+    }
+    if (x >= 0 && x < w && y >= 0 && y < h) best = ink[y * w + x];
+    for (int r = 1; r <= size; r++) {
+        for (int dy = -1; dy <= 1; dy++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                if (!dx && !dy) continue;
+                int sx = x + dx * r, sy = y + dy * r;
+                if (sx < 0 || sx >= w || sy < 0 || sy >= h) continue;
+                int c = ink[sy * w + sx];
+                if (c > best) best = c;
+            }
+        }
+    }
+    return (BYTE)best;
+}
+
+// Same "white ink OVER black" compositing as ObCJKCompositeGlyphPixel, with the
+// black layer = BackgroundOpacity backdrop unioned with the outline/shadow
+// layer (blackCov 0..255 scaled by outlineAlphaPct 0..100).
+static void ObCJKCompositeGlyphPixelOutline(BYTE v, int bgOpacityPct, BYTE blackCov, int outlineAlphaPct,
+                                            BYTE* outR, BYTE* outG, BYTE* outB, BYTE* outA)
+{
+    float aInk   = v / 255.0f;
+    float aBg    = (bgOpacityPct > 0) ? bgOpacityPct / 100.0f : 0.0f;
+    float aOl    = (blackCov / 255.0f) * (outlineAlphaPct / 100.0f);
+    float aBlack = aBg + aOl * (1.0f - aBg);
+    float aOut   = aInk + aBlack * (1.0f - aInk);
+    BYTE  color  = 0;
+    if (aOut > 0.0f) {
+        float cOut = 255.0f * aInk / aOut;
+        if (cOut > 255.0f) cOut = 255.0f;
+        color = (BYTE)(cOut + 0.5f);
+    }
+    *outR = *outG = *outB = color;
+    *outA = (BYTE)(aOut * 255.0f + 0.5f);
 }
 
 // [2026-07-16] Horizontal glyph alignment within its advance cell. Only
@@ -786,6 +851,36 @@ static ObCJKFontSlot* ObCJKGlyphAtlas_GetSlotImpl(int fontID, bool isAscii)
     slot->contrastLevel = cfgContrast;
     slot->cellWidth      = cfgWidth;   // 0 = auto, see ObCJKFontSlot::cellWidth comment
     slot->cellHeight     = cfgHeight;  // always >0, see ObCJKFontSlot::cellHeight comment
+
+    // [2026-10-03 18:30] Outline/shadow (slot-level keys, shared by _1/_2).
+    {
+        const char* section = ObCJKCodePageName(g_activeCodePage);
+        char olKey[48] = {};
+        wsprintfA(olKey, "FontParam%d_OutlineMode", engineID);
+        int olMode = GetPrivateProfileIntA(section, olKey, 0, k_iniMain);
+        wsprintfA(olKey, "FontParam%d_OutlineSize", engineID);
+        int olSizeIni = GetPrivateProfileIntA(section, olKey, 1, k_iniMain);
+        wsprintfA(olKey, "FontParam%d_OutlineAlpha", engineID);
+        int olAlpha = GetPrivateProfileIntA(section, olKey, 100, k_iniMain);
+
+        if (olMode < 0 || olMode > 2) olMode = 0;
+        if (olSizeIni < 1) olSizeIni = 1;
+        if (olSizeIni > 3) olSizeIni = 3;
+        if (olAlpha < 0)   olAlpha = 0;
+        if (olAlpha > 100) olAlpha = 100;
+
+        int olSize = ObCJKScaleRound(olSizeIni, renderScale);
+        if (olSize < 1) olSize = 1;
+
+        slot->outlineMode  = olMode;
+        slot->outlineSize  = olSize;
+        slot->outlineAlpha = olAlpha;
+        if (olMode != 0) {
+            // debug log: outline config actually read for this slot
+            _MESSAGE("obCJK:GlyphAtlas:OutlineCfg engineID=%d isAscii=%d section=%s mode=%d sizeIni=%d sizeScaled=%d alpha=%d renderScale=%.4f",
+                     engineID, isAscii ? 1 : 0, section, olMode, olSizeIni, olSize, olAlpha, renderScale);
+        }
+    }
 
     // GlyphXAlign Rule C's Y-centering needs `ascent` (baseline-to-cell-top
     // distance) to convert its cellHeight-relative (cell-top-zero) centered

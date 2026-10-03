@@ -113,13 +113,36 @@ Each row has two buttons on the right: "Apply Selection" (applies the font name 
 selected in the font list to this row) and "Reset" (restores this row to the built-in default
 for this encoding/SLOT).
 
-### 6. Glyph Background Opacity
+### 6. Outline/Shadow
+Located below the full-width block and above the preview on each SLOT / NorthernUI role tab.
+This is a **per-SLOT setting shared by both rows**: the half-width and full-width rows use the
+same values (not independent per row). Each SLOT / role tab has its own set; off by default.
+- **Mode**: Off / Shadow / Outline. Shadow adds a black offset layer to the lower right of the
+  glyph; Outline adds a black border around the glyph on all sides.
+- **Width**: 1–3 (unit: pixels, the same unit as width/spacing etc.).
+- **Opacity**: 0–100 (unit: percent %). The opacity of the black edge; 0 = invisible,
+  100 = solid black.
+
+The ini keys written are `FontParam<N>_OutlineMode` (0 off / 1 shadow / 2 outline),
+`FontParam<N>_OutlineSize`, and `FontParam<N>_OutlineAlpha`, in the same section as
+`FontParam<N>_1`/`_2`.
+
+Notes:
+- Unlike "Glyph Background Opacity", this only adds a black edge along the strokes and does not
+  fill the whole glyph cell with black; the two can be used together.
+- If a SLOT's font is shared by several interfaces (for example SLOT 2 is used by both
+  subtitles and the loading bar), all of them get the outline; the only way to separate them is
+  to switch fonts in the interface XML.
+- The preview canvas shows the shadow/outline live (the black edge uses a solid color to
+  approximate opacity; for reference only).
+
+### 7. Glyph Background Opacity
 Range 0–100 (unit: percent %). 0 = fully transparent background, 100 = fully black background,
 values in between produce a semi-transparent black background. This only affects how the
 background is composited when rendering glyphs; it does not affect the character body's own
 weight density/contrast.
 
-### 7. Punctuation/Narrow Character Horizontal Alignment
+### 8. Punctuation/Narrow Character Horizontal Alignment
 Only affects characters whose "black box is narrower than the cell" (punctuation marks,
 Japanese small kana, etc.); regular full-width CJK characters are unaffected:
 - **Rule A (by font bearing)**: Follows the left-edge position designed into the font itself
@@ -137,7 +160,7 @@ Japanese small kana, etc.); regular full-width CJK characters are unaffected:
   "center all narrow characters" is too aggressive, but still want a few specific symbols
   centered.
 
-### 8. Preview
+### 9. Preview
 The canvas below live-previews the style of the currently selected font with the above
 parameters applied (this is only an approximate preview, not the actual in-game rendering).
 

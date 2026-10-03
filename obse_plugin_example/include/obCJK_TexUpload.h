@@ -91,16 +91,23 @@ static void ObCJKTexUpload_PlaceGlyphImpl(int fontID0, WORD code, void* fontInfo
     ObCJKTexSwapRegion* region = ObCJKTexSwapGetRegion(fontID0);
     if (!region) return;  // this font's texture was never swapped/enlarged (TexSwap disabled or bad native format) — nothing to place into
 
-    int w = (int)entry->gm.gmBlackBoxX;
+    int w = (int)entry->gm.gmBlackBoxX;   // ink box
     int h = (int)entry->gm.gmBlackBoxY;
     if (w <= 0 || h <= 0) return;
+
+    // Outline/shadow padding: the quad written to the texture is the ink box
+    // plus padL/padT/padR/padB (all 0 when the slot has no outline).
+    int padL, padT, padR, padB;
+    ObCJKOutlinePads(slot, &padL, &padT, &padR, &padB);
+    int qw = w + padL + padR;   // quad (ink + padding)
+    int qh = h + padT + padB;
 
     // Shelf-pack allocate within the reserved region, continuing from
     // wherever the previous dynamic placement left the cursor. 1px gap
     // between glyphs against filter bleed.
     int penX = region->penX, penY = region->penY, rowH = region->rowHeight;
-    if (penX + w + 1 > region->texSize) { penY += rowH + 1; penX = 0; rowH = 0; }
-    if (penY + h + 1 > region->texSize) {
+    if (penX + qw + 1 > region->texSize) { penY += rowH + 1; penX = 0; rowH = 0; }
+    if (penY + qh + 1 > region->texSize) {
         if (!region->overflowWarned) {
             region->overflowWarned = true;
             _WARNING("obCJK:TexUpload: CJK region full for slot=%d (texSize=%d) — further glyphs stay unplaced (blank) until the font reloads",
@@ -112,11 +119,20 @@ static void ObCJKTexUpload_PlaceGlyphImpl(int fontID0, WORD code, void* fontInfo
     IDirect3DTexture9* tex = ObCJKGetRealFontTexture(fontInfo);
     if (!tex) return;  // InitTexture hasn't realized this font's D3D texture yet — not an error, retry next call
 
+    // Density/contrast-processed ink coverage, needed by the outline/shadow
+    // black layer (which samples neighbouring ink pixels).
+    BYTE* inkBuf = nullptr;
+    if (slot && slot->outlineMode != 0) {
+        inkBuf = (BYTE*)malloc((size_t)w * (size_t)h);
+        if (!inkBuf) return;
+    }
+
     D3DLOCKED_RECT locked;
-    RECT rect = { penX, penY, penX + w, penY + h };
+    RECT rect = { penX, penY, penX + qw, penY + qh };
     HRESULT hr = tex->LockRect(0, &locked, &rect, 0);
     if (FAILED(hr)) {
         _WARNING("obCJK:TexUpload: LockRect failed hr=0x%08X slot=%d code=0x%04X", hr, ObCJKSlotFromFontID(fontID0), code);
+        free(inkBuf);
         return;
     }
 
@@ -129,24 +145,44 @@ static void ObCJKTexUpload_PlaceGlyphImpl(int fontID0, WORD code, void* fontInfo
         int srcPitch = (w + 3) & ~3;  // GGO_GRAY8_BITMAP rows are DWORD-aligned
         int bgOpacityPct = ObCJKBackgroundOpacityPercent();
         BYTE* dstBase = (BYTE*)locked.pBits;
-        for (int row = 0; row < h; row++) {
-            BYTE* src = entry->bitmap + row * srcPitch;
-            BYTE* dst = dstBase + row * locked.Pitch;
-            for (int col = 0; col < w; col++) {
-                BYTE v = slot ? ObCJKApplyDensityContrast(src[col], slot->density, slot->contrastLevel)
-                              : ObCJKApplyDensityContrast(src[col], 0, 0);
-                ObCJKCompositeGlyphPixel(v, bgOpacityPct,
-                    &dst[col * 4 + 0], &dst[col * 4 + 1], &dst[col * 4 + 2], &dst[col * 4 + 3]);
+        if (!inkBuf) {
+            for (int row = 0; row < h; row++) {
+                BYTE* src = entry->bitmap + row * srcPitch;
+                BYTE* dst = dstBase + row * locked.Pitch;
+                for (int col = 0; col < w; col++) {
+                    BYTE v = slot ? ObCJKApplyDensityContrast(src[col], slot->density, slot->contrastLevel)
+                                  : ObCJKApplyDensityContrast(src[col], 0, 0);
+                    ObCJKCompositeGlyphPixel(v, bgOpacityPct,
+                        &dst[col * 4 + 0], &dst[col * 4 + 1], &dst[col * 4 + 2], &dst[col * 4 + 3]);
+                }
+            }
+        } else {
+            for (int row = 0; row < h; row++) {
+                BYTE* src = entry->bitmap + row * srcPitch;
+                for (int col = 0; col < w; col++)
+                    inkBuf[row * w + col] = ObCJKApplyDensityContrast(src[col], slot->density, slot->contrastLevel);
+            }
+            for (int qrow = 0; qrow < qh; qrow++) {
+                BYTE* dst = dstBase + qrow * locked.Pitch;
+                int iy = qrow - padT;
+                for (int qcol = 0; qcol < qw; qcol++) {
+                    int ix = qcol - padL;
+                    BYTE v = (ix >= 0 && ix < w && iy >= 0 && iy < h) ? inkBuf[iy * w + ix] : 0;
+                    BYTE blackCov = ObCJKOutlineCoverage(inkBuf, w, h, ix, iy, slot->outlineMode, slot->outlineSize);
+                    ObCJKCompositeGlyphPixelOutline(v, bgOpacityPct, blackCov, slot->outlineAlpha,
+                        &dst[qcol * 4 + 0], &dst[qcol * 4 + 1], &dst[qcol * 4 + 2], &dst[qcol * 4 + 3]);
+                }
             }
         }
     } __finally {
         tex->UnlockRect(0);
+        free(inkBuf);
     }
 
     entry->tsU0 = (float)penX / (float)region->texSize;
     entry->tsV0 = (float)penY / (float)region->texSize;
-    entry->tsU1 = (float)(penX + w) / (float)region->texSize;
-    entry->tsV1 = (float)(penY + h) / (float)region->texSize;
+    entry->tsU1 = (float)(penX + qw) / (float)region->texSize;
+    entry->tsV1 = (float)(penY + qh) / (float)region->texSize;
 
     // Mirrors obCJK_GlyphAtlas.h's EnsureVRAM population of `native` (the
     // same 56-byte struct sub_573F10 reads as arg_0), just sourced from the
@@ -158,8 +194,8 @@ static void ObCJKTexUpload_PlaceGlyphImpl(int fontID0, WORD code, void* fontInfo
     entry->native.u1_topRight = entry->tsU1; entry->native.v0_topRight = entry->tsV0;
     entry->native.u0_botLeft  = entry->tsU0; entry->native.v1_botLeft  = entry->tsV1;
     entry->native.u1_botRight = entry->tsU1; entry->native.v1_botRight = entry->tsV1;
-    entry->native.width           = (float)w;
-    entry->native.height          = (float)h;
+    entry->native.width           = (float)qw;
+    entry->native.height          = (float)qh;
     // sub_573F10 sums THREE separate terms into pen.x (advance/+0x2C first,
     // then width/+0x24 + advanceNaNGuard/+0x30 at the end — advanceNaNGuard
     // is always added in the normal, non-NaN path). Filling both with the
@@ -171,6 +207,11 @@ static void ObCJKTexUpload_PlaceGlyphImpl(int fontID0, WORD code, void* fontInfo
     ObCJKComputeGlyphXTerms(entry->gm.gmptGlyphOrigin.x, w, (int)entry->gm.gmCellIncX,
                             code, slot ? slot->cellWidth : 0,
                             &entry->native.advance, &entry->native.advanceNaNGuard);
+    // Outline/shadow: the quad grew by padL/padR, so move the quad's left edge
+    // left by padL and take padR from the trailing term — the three terms
+    // still sum to gmCellIncX and the ink stays where it was.
+    entry->native.advance         -= (float)padL;
+    entry->native.advanceNaNGuard -= (float)padR;
     // Per-glyph baseline — see obCJK_GlyphAtlas.h's EnsureVRAM (same fix) /
     // ObCJKFontSlot::yPosOffset comment for the disassembly-backed rationale.
     // GlyphXAlign Rule C Y-centering: topOffsetFromBaseline/glyphTopFromCellTop
@@ -183,13 +224,14 @@ static void ObCJKTexUpload_PlaceGlyphImpl(int fontID0, WORD code, void* fontInfo
         float glyphTopFromCellTop = ((float)slot->cellHeight - (float)h) / 2.0f;
         topOffsetFromBaseline = (float)slot->ascent - glyphTopFromCellTop;
     }
-    entry->native.baseline        = topOffsetFromBaseline + (slot ? (float)slot->yPosOffset : 0.0f);
+    // Outline/shadow: quad top is padT above the ink top.
+    entry->native.baseline        = topOffsetFromBaseline + (float)padT + (slot ? (float)slot->yPosOffset : 0.0f);
 
     entry->texSwapReady = true;
 
-    region->penX      = penX + w + 1;
+    region->penX      = penX + qw + 1;
     region->penY      = penY;
-    region->rowHeight = (h > rowH) ? h : rowH;
+    region->rowHeight = (qh > rowH) ? qh : rowH;
 }
 
 // SEH firewall: this is first use of the entire NiTexturingProperty/NiTArray/
