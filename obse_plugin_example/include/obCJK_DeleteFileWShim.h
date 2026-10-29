@@ -1,14 +1,10 @@
 #pragma once
-// Fix for the "delete save" false-success bug: sub_453480's DeleteFileA
-// call (VA 0x004534A6) never checks its result and unconditionally removes
-// the in-game save-list entry, so a CJK/non-ASCII save name silently fails
-// to delete on disk. Can't patch that call site directly — xOBSE's own
-// Hooks_SaveLoad.cpp always wins the race for those same 6 bytes — so this
-// hooks sub_453480's entry instead and does the real delete itself
-// (.ess + derived .obse co-save) before either xOBSE's or the game's own
-// attempt runs. Full investigation, abandoned call-site-patch design, and
-// the diag-hook trampoline gap it surfaced:
-// 存檔命名與刪除支援非ASCII.md
+// Fix: deleting a CJK/non-ASCII-named save reported success but left the
+// file on disk. sub_453480's DeleteFileA call (VA 0x004534A6) ignores its
+// result and always removes the list entry. That call site is already
+// patched by xOBSE (Hooks_SaveLoad.cpp), so this hooks sub_453480's entry
+// instead and deletes the .ess + derived .obse co-save itself before
+// xOBSE's or the game's own attempt runs.
 #include <windows.h>
 #include <string.h>
 #include "common/IDebugLog.h"
@@ -61,35 +57,29 @@ static void ObCJKFollowUpDeleteOne(const char* path, const char* kind)
 static void ObCJKDeriveCosavePath(const char* essPath, char* outObsePath, size_t outSize)
 {
     char buf[MAX_PATH];
-    lstrcpynA(buf, essPath, MAX_PATH);
+    (void)lstrcpynA(buf, essPath, MAX_PATH);  // C6031: truncation is intended
 
     char bakSuffix[MAX_PATH] = "";
     char* bakPos = strstr(buf, ".bak");
     if (bakPos) {
-        lstrcpynA(bakSuffix, bakPos, MAX_PATH);
+        (void)lstrcpynA(bakSuffix, bakPos, MAX_PATH);
         *bakPos = '\0';
     }
 
     char* lastDot = strrchr(buf, '.');
     if (lastDot) *lastDot = '\0';
 
-    // buf and bakSuffix are each capped at MAX_PATH by lstrcpynA above, so
-    // "%s.obse%s" can't exceed ~525 chars — build into a temp buffer sized
-    // for that worst case, then lstrcpynA-truncate into the caller's actual
-    // outObsePath/outSize (wsprintfA itself has no length parameter, so
-    // writing straight into outObsePath had no truncation protection).
+    // Fix: wsprintfA has no length limit; writing straight into outObsePath
+    // could overflow. Build into a worst-case-sized temp, then truncate.
     char tmp[MAX_PATH * 2 + 16];
     wsprintfA(tmp, "%s.obse%s", buf, bakSuffix);
-    lstrcpynA(outObsePath, tmp, (int)outSize);
+    (void)lstrcpynA(outObsePath, tmp, (int)outSize);
 }
 
-// Hooked at sub_453480's entry (see this file's top comment for why here
-// and not the DeleteFileA call site further down). Reads a2+0x3C (the save
-// entry's filename) before the entry gets destructed, then deletes both the
-// .ess and its derived .obse companion right away — this must run
-// synchronously here, not deferred to next frame, so it lands before the
-// game's own post-delete save-list rescan.
-static void __cdecl ObCJKDeleteEntryDiagLog(int a2, int a3)
+// Runs at sub_453480's entry: reads the save entry's filename (a2+0x3C)
+// before the entry is destructed and deletes the .ess and .obse
+// synchronously, before the game's post-delete save-list rescan.
+static void __cdecl ObCJKDeleteSaveFix(int a2, int a3)
 {
     const char* fname = a2 ? (const char*)(a2 + 0x3C) : nullptr;
     if (!fname) return;
@@ -101,30 +91,28 @@ static void __cdecl ObCJKDeleteEntryDiagLog(int a2, int a3)
     ObCJKFollowUpDeleteOne(obsePath, "obse");
 }
 
-static BYTE* g_deleteEntryDiagTramp = nullptr;
+static BYTE* g_deleteSaveFixTramp = nullptr;
 
-// thiscall entry: ecx=this (unused), [esp+4]=a2(int, the save-list entry
-// to delete), [esp+8]=a3(char*, unused) — same CPU state as sub_453480's
-// real first instruction, since this hook patches the function's own entry
-// VA. Read-only: nothing is written back to the stack, original arguments
-// flow through untouched.
-static __declspec(naked) void ObCJKDeleteEntryDiagHook()
+// thiscall entry: ecx=this (unused), [esp+4]=a2 (save-list entry to
+// delete), [esp+8]=a3 (char*, unused). Read-only; arguments pass through
+// unchanged.
+static __declspec(naked) void ObCJKDeleteSaveFixHook()
 {
     __asm {
         pushad
         push dword ptr [esp+0x28]  // a3
         push dword ptr [esp+0x28]  // a2 (offset stays +0x28: esp already shifted by the a3 push)
-        call ObCJKDeleteEntryDiagLog
+        call ObCJKDeleteSaveFix
         add  esp, 8
         popad
-        jmp  dword ptr [g_deleteEntryDiagTramp]
+        jmp  dword ptr [g_deleteSaveFixTramp]
     }
 }
 
-static void ObCJKInstallDeleteEntryDiagHook()
+static void ObCJKInstallDeleteSaveFixHook()
 {
     static const DWORD kVA_DeleteEntry = 0x00453480;  // sub_453480, delete-save entry point
-    if (g_deleteEntryDiagTramp) return;  // already installed
+    if (g_deleteSaveFixTramp) return;  // already installed
 
-    ObCJKInstallHook((BYTE*)kVA_DeleteEntry, (void*)ObCJKDeleteEntryDiagHook, &g_deleteEntryDiagTramp, "DeleteEntryDiag");
+    ObCJKInstallHook((BYTE*)kVA_DeleteEntry, (void*)ObCJKDeleteSaveFixHook, &g_deleteSaveFixTramp, "DeleteSaveFix");
 }

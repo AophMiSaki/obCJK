@@ -1,13 +1,10 @@
 #pragma once
-// Retargets the game's own CreateFileA call site inside its CRT _fsopen
-// chain (sub_99D763, VA 0x0099D997) to CreateFileW, decoding the path under
-// g_activeCodePage instead of the system ANSI code page — fixes "Game
-// Saved" reporting success while no .ess file was actually written for
-// CJK/non-ASCII save names. Falls back to the original CreateFileA when the
-// path isn't valid under g_activeCodePage (a legacy save written under a
-// different code page). Full root-cause derivation, abandoned prior
-// designs (cross-CRT FILE* crash, wrong hook point), and blast-radius
-// check: 存檔命名與刪除支援非ASCII.md
+// Fix: "Game Saved" reported success but no .ess was written for
+// CJK/non-ASCII save names. Retargets the CreateFileA call inside the
+// game's CRT _fsopen chain (sub_99D763, VA 0x0099D997) to CreateFileW,
+// decoding the path under g_activeCodePage instead of the system ANSI code
+// page. Falls back to CreateFileA when the path isn't valid under
+// g_activeCodePage (legacy saves written under another code page).
 #include <windows.h>
 #include <string.h>
 #include "common/IDebugLog.h"
@@ -15,14 +12,19 @@
 #include "obCJK_Encoding.h"
 #include "obCJK_SaveDiag.h"  // SaveDiagEnable + ObCJKShortErrorReason
 
-// Same signature as CreateFileA — this directly replaces the `call dword
-// ptr [CreateFileA]` instruction at the patched site, so the calling
-// convention (stdcall, callee pops its own 7 args) must match exactly.
+// Same signature as CreateFileA (stdcall, 7 args) — called in place of
+// `call dword ptr [CreateFileA]`.
 static HANDLE WINAPI ObCJKCreateFileAShim(
     LPCSTR lpFileName, DWORD dwDesiredAccess, DWORD dwShareMode,
     LPSECURITY_ATTRIBUTES lpSecurityAttributes, DWORD dwCreationDisposition,
     DWORD dwFlagsAndAttributes, HANDLE hTemplateFile)
 {
+    // C6387: null name can't be opened by either path; fail like CreateFileA would.
+    if (!lpFileName) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return INVALID_HANDLE_VALUE;
+    }
+
     wchar_t wpath[MAX_PATH];
     int wLen = lpFileName
         ? MultiByteToWideChar((UINT)g_activeCodePage, MB_ERR_INVALID_CHARS,
@@ -35,30 +37,17 @@ static HANDLE WINAPI ObCJKCreateFileAShim(
         : CreateFileA(lpFileName, dwDesiredAccess, dwShareMode, lpSecurityAttributes,
                        dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile);
 
-    // Scoped to .ess (save file) paths only — this call site is the CRT's
-    // shared _fsopen chain, so it also sees read-only opens the game makes
-    // to fetch existing saves' metadata (description/playtime) whenever the
-    // load/save menu refreshes, not just real save writes. isWrite tells
-    // those apart via GENERIC_WRITE. SaveDiagEnable=1 logs every touch
-    // (read or write) with full decode detail; =0 (default) logs only real
-    // writes (an actual new/overwritten save), one concise ok/FAILED line.
+    // Logging, .ess paths only. This shared _fsopen site also sees read-only
+    // opens (save-list metadata); isWrite separates them. SaveDiagEnable=1
+    // logs every open in detail; =0 logs only writes, one ok/FAILED line.
     size_t len = lpFileName ? strlen(lpFileName) : 0;
     if (len >= 4 && _stricmp(lpFileName + len - 4, ".ess") == 0) {
         bool ok = (h != INVALID_HANDLE_VALUE);
         bool isWrite = (dwDesiredAccess & GENERIC_WRITE) != 0;
         DWORD err = ok ? 0 : GetLastError();
-        // The game's own save-file wrapper (sub_42FE80) always probes the
-        // target path with CRT mode "r+b" (dwCreationDisposition=
-        // OPEN_EXISTING) first, and only when that fails falls back to "wb"
-        // (create) + reopen. Right after the backup-rotation step
-        // (sub_45F2E0) renames the previous save out of the way, this probe
-        // is *expected* to miss with ERROR_FILE_NOT_FOUND on every single
-        // save — the CRT's own fallback then creates + reopens the file
-        // successfully in the same call chain. IDA-verified via
-        // sub_45F2E0/sub_430970/sub_42FE80 decompile + mode-string check
-        // (0xA36340="r+b", 0xA36338="wb"). Not a real failure, so it must
-        // not be logged as one — a genuine problem (permission denied, disk
-        // full, path too long, ...) still surfaces as FAILED below.
+        // Fix: not logged as FAILED — sub_42FE80 first opens with "r+b"
+        // (OPEN_EXISTING), which misses with ERROR_FILE_NOT_FOUND on every
+        // save after sub_45F2E0's backup rotation, then falls back to "wb".
         bool isBenignRetryProbe = !ok && isWrite && err == ERROR_FILE_NOT_FOUND
                                    && dwCreationDisposition == OPEN_EXISTING;
         if (ObCJKSaveDiagEnabled()) {
@@ -83,13 +72,9 @@ static HANDLE WINAPI ObCJKCreateFileAShim(
     return h;
 }
 
-// Retargets the 6-byte `FF 15 xx xx xx xx` (call dword ptr [CreateFileA])
-// at sub_99D763's one CreateFileA call site to a direct 5-byte `E8 rel32`
-// call into this shim, padded with one trailing NOP so the following
-// instruction (`mov edi, eax` at site+6, confirmed via get_bytes) is left
-// completely untouched. Not ObCJKPatchCallTarget: that helper only
-// retargets an existing `E8` call, and this site is an IAT-indirect `FF
-// 15`, not a direct call — a different opcode shape needing its own patch.
+// Rewrites sub_99D763's 6-byte `FF 15 xx xx xx xx` (call dword ptr
+// [CreateFileA]) into `E8 rel32` + NOP calling the shim; the next
+// instruction is untouched. (ObCJKPatchCallTarget only handles `E8` calls.)
 static bool ObCJKInstallCreateFileWShim()
 {
     static const DWORD kVA_CreateFileACallSite = 0x0099D997;

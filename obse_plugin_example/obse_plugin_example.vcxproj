@@ -162,6 +162,7 @@
     <ClInclude Include="include\obCJK_GlyphHook_UTF8.h" />
     <ClInclude Include="include\obCJK_HookUtil.h" />
     <ClInclude Include="include\obCJK_LineBreakHook.h" />
+    <ClInclude Include="include\obCJK_LineFloorHook.h" />
     <ClInclude Include="include\obCJK_IME_In.h" />
     <ClInclude Include="include\obCJK_IME_Out.h" />
     <ClInclude Include="include\obCJK_LineBreakHook_UTF8.h" />

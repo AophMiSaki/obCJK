@@ -1,56 +1,38 @@
 #pragma once
-// UTF-8 counterpart of obCJK_WordWrapHook.h — hooks the identical native VAs
-// (same sub_577C10/sub_578960/sub_575B40 code, see that file's header
-// comment for full derivation) but decodes variable-length UTF-8 sequences
-// instead of assuming a fixed 2-byte DBCS lead/trail pair. Per the
-// 2026-07-18 architecture decision (memory obcjk-utf8-plan), this file shares NO logic with the DBCS
-// version — every symbol below is independently named (Utf8 suffix) so both
-// headers can be compiled into the same translation unit (main.cpp) and the
-// caller picks which set of Install*HookUtf8()/Install*Hook() functions to
-// call at runtime based on the ini's utf8-mode switch. Only one set is ever
-// actually installed (patches real game-code bytes), so the two files' hooks
-// never run against each other.
+// UTF-8 word-wrap hooks. Same native VAs as the DBCS obCJK_WordWrapHook.h
+// (sub_577C10 / sub_578960 / sub_575B40), but decodes variable-length UTF-8
+// sequences instead of a fixed 2-byte lead/trail pair. Shares no logic with
+// the DBCS version; every symbol has a Utf8 suffix so both headers compile
+// into main.cpp, which installs only one set based on ActiveCodePage.
 //
-// UTF-8 structurally simplifies several of the DBCS disambiguation tricks:
-// continuation bytes (0x80-0xBF) never overlap any lead-byte range
-// (0xC2-0xDF/0xE0-0xEF/0xF0-0xF4) or the ASCII range (0x00-0x7F), so a
-// byte's own value unambiguously tells you whether it's a sequence start,
-// mid-sequence, or plain ASCII — no odd/even "run length" parity walk is
-// needed the way DBCS's overlapping lead/trail ranges require (see
-// obCJK_WordWrapHook.h's ObCJKLineSplitPairIsGenuineLead /
-// ObCJKIsGenuineLeadAtIdx).
+// Hooks:
+//   WordWrap        sub_577C10 per-character width/height + continuation stash
+//   NodeCopy        carries node+0x05..0x07 to the permanent node
+//   SecondLoop      same as WordWrap for sub_578960's second loop
+//   SmartQuoteGuard sub_575B40 0x91-0x94 continuation bytes not turned into '/"
+//   LineSplitPair   forced line break doesn't split a UTF-8 sequence
+//   PreMeasure      CENTER/RIGHT-align width pre-measurement
+// TrailByteGuard/TrailByteGuard2 have no UTF-8 counterpart: 0x7E can never be
+// a continuation byte, so native's '~' strip is already correct.
 //
-// KNOWN GAP (documented at the relevant hook below, not silently skipped):
-// the fourth/sixth DBCS hooks (TrailByteGuard/TrailByteGuard2, protecting a
-// misidentified '~' hotkey marker) have no UTF-8 counterpart — 0x7E is
-// always plain ASCII in UTF-8 (can never be a continuation byte), so
-// native's own '~'-strip is already correct and needs no override. The
-// seventh hook (LineSplitPair) only protects 2-byte UTF-8 sequences for a
-// structural reason explained at that hook.
+// Continuation bytes (0x80-0xBF) never overlap lead bytes (0xC2-0xF4) or
+// ASCII, so a byte's role is determined by its value alone.
 #include <windows.h>
 #include "common/IDebugLog.h"
 #include "obse/GameAPI.h"
 #include "obCJK_HookUtil.h"
 #include "obCJK_Encoding.h"
 #include "obCJK_GlyphAtlas.h"
-// Needed only for ObCJKFontIDFromInfoPtr() (pure FontInfo*->fontID pointer
-// arithmetic, no encoding logic) — same reuse obCJK_WordWrapHook.h makes of
-// this file. Not a violation of the "no shared code" decision: that decision
-// covers the per-encoding DISAMBIGUATION logic, not encoding-agnostic
-// utilities. If obCJK_GlyphHook_UTF8.h changes this helper's shape later,
-// revisit this include.
+// Needed only for ObCJKFontIDFromInfoPtr() (encoding-agnostic).
 #include "obCJK_GlyphHook.h"
 
 // --- UTF-8 decode helpers, local to this file ------------------------------
 
 // Validates and returns the full sequence length starting at buf[idx]
 // (2/3/4), or 0 if buf[idx] isn't a multi-byte lead or the following
-// continuation bytes are missing/malformed/truncated. Mirrors the DBCS
-// files' "trailOk" pattern: callers fall back to native single-byte handling
-// on 0, same as a failed DBCS lead/trail check. Safe against running past a
-// NUL terminator: NUL (0x00) never satisfies ObCJKIsUtf8Continuation
-// (0x80-0xBF), so a truncated sequence at the buffer end always fails here
-// rather than reading past the terminator.
+// continuation bytes are missing/malformed/truncated (callers then fall back
+// to native single-byte handling). Never reads past a NUL terminator, since
+// NUL is not a continuation byte.
 static int ObCJKUtf8ValidSeqLenAt(const BYTE* buf, DWORD idx)
 {
     BYTE lead = buf[idx];
@@ -72,29 +54,17 @@ static DWORD ObCJKUtf8Decode(const BYTE* buf, DWORD idx, int len)
     return cp;
 }
 
-// Glyph-atlas lookup key for a decoded codepoint. [2026-07-18] obCJK_GlyphAtlas.h's
-// ObCJKGlyphAtlas_GetGlyph now calls GetGlyphOutlineW (not GetGlyphOutlineA)
-// under kCP_UTF8, so BMP-range codepoints (U+0000-U+FFFF — every CJK
-// Unified Ideograph, U+4E00-U+9FFF, lands here) rasterize correctly (Layer 4
-// landed). The flat glyph table is still
-// WORD-indexed though, so codepoints above U+FFFF (4-byte sequences, astral
-// planes) still truncate here — extremely rare in game text; same "falls
-// through, never worse than leaving it unmapped" fallback philosophy as
-// every other unmapped case in this file.
+// Glyph-atlas lookup key for a decoded codepoint. The glyph table is
+// WORD-indexed, so codepoints above U+FFFF are truncated.
 static inline WORD ObCJKUtf8CodeForGlyph(DWORD codepoint)
 {
     return (WORD)(codepoint & 0xFFFF);
 }
 
 // Finds the lead byte of the sequence that srcPtr[idx] is a continuation
-// byte of, if any. Unlike DBCS (where a byte's lead/trail role is only
-// resolvable by parity-walking, since the ranges overlap), a continuation
-// byte can ONLY ever be mid/end-of-sequence — so this simply walks backward
-// through the continuation run (bounded to 3 steps, the max continuation
-// bytes in any valid sequence) and validates the byte where the run breaks
-// is a lead byte whose declared length actually reaches idx. Returns false
-// (not found) if idx isn't a continuation byte, the run exceeds 3 bytes, or
-// the byte before the run isn't a valid covering lead byte.
+// byte of: walks back through the continuation run (max 3 bytes) and checks
+// that the lead's declared length reaches idx. Returns false if idx isn't a
+// continuation byte, the run exceeds 3 bytes, or no covering lead is found.
 static bool ObCJKUtf8FindGenuineLeadForIdx(const BYTE* srcPtr, DWORD idx, DWORD* outLeadIdx, int* outSeqLen)
 {
     if (!ObCJKIsUtf8Continuation(srcPtr[idx])) return false;
@@ -118,14 +88,10 @@ static const DWORD kVA_WordWrapLoopUtf8 = 0x00577F05;
 
 static BYTE* g_wordWrapTrampUtf8   = nullptr;
 static DWORD g_wwSavedEspUtf8      = 0;
-static int   g_wwExtraAdvanceUtf8  = 0;  // (seqLen-1) when a glyph was substituted, else 0 — dynamic step vs DBCS's fixed +1
+static int   g_wwExtraAdvanceUtf8  = 0;  // (seqLen-1) when a glyph was substituted, else 0
 
-// [1-a] ASCII/half-width single-byte advance override — identical role and
-// logic to obCJK_WordWrapHook.h's ObCJKWordWrapAsciiOverride (that function
-// is itself encoding-agnostic, but duplicated here rather than included
-// per the "no shared code between variants" decision — memory
-// obcjk-utf8-plan). See that function's comment for the node+0x1C/0x00/0x24
-// field derivation.
+// [1-a] ASCII/half-width single-byte advance override: writes the
+// substituted glyph's advance to node+0x24.
 static void ObCJKWordWrapAsciiOverrideUtf8(BYTE* node, BYTE byteVal)
 {
     DWORD imgField = *(DWORD*)(node + 0x1C);
@@ -164,14 +130,10 @@ static void __cdecl ObCJKWordWrapCheckUtf8(BYTE* ediVal, DWORD esiVal, DWORD esp
     ObCJKGlyphEntry* glyph = ObCJKGlyphAtlas_GetGlyph(fontID, code);
     if (glyph && glyph->valid) {
         *(int*)(node + 0x24) = (int)glyph->gm.gmCellIncX;
-        *(int*)(node + 0x28) = (int)glyph->gm.gmBlackBoxY;
-        // +0x05/+0x06/+0x07 padding stash, carried onward by
-        // ObCJKNodeCopyHookUtf8 below. IDA-verified safe to use all 3 bytes
-        // (memory obcjk-utf8-plan「IDA交叉驗證收尾」— sub_576F30/sub_577120/
-        // sub_5772A0/sub_576AB0/sub_578960 never write +0x05~+0x07). Stash
-        // ALL (seqLen-1) continuation bytes in order so
-        // obCJK_GlyphHook_UTF8.h's Path C can reconstruct the full 2/3/4-byte
-        // sequence from node[4](lead)+node[5..7], not just the last byte.
+        *(int*)(node + 0x28) = ObCJKNodeHeightFor(fontID, glyph);
+        // Stash all (seqLen-1) continuation bytes in node padding +0x05..0x07
+        // (never written by native) so Path C can rebuild the full sequence
+        // from node[4..7]. Carried onward by ObCJKNodeCopyHookUtf8.
         for (int i = 1; i < seqLen; i++) {
             node[0x05 + (i - 1)] = ediVal[esiVal + i];
         }
@@ -203,19 +165,13 @@ static void ObCJKInstallWordWrapHookUtf8()
 }
 
 // --- Second hook: scratch-node -> permanent-node copy (kVA_NodeCopy) -------
-// Byte copy only, encoding-agnostic in DBCS too — duplicated here (rather
-// than shared) purely to keep this file self-contained per the architecture
-// decision; the body is intentionally identical.
+// Copies the +0x05..0x07 continuation-byte stash to the permanent node.
 
 static const DWORD kVA_NodeCopyUtf8 = 0x005770CE;
 static BYTE* g_nodeCopyTrampUtf8 = nullptr;
 
 static void __cdecl ObCJKNodeCopyUtf8(BYTE* scratchNode, BYTE* permanentNode)
 {
-    // All 3 stash bytes (+0x05/+0x06/+0x07), not just +0x05 — native's own
-    // node-copy code doesn't touch this padding range either way (IDA-verified,
-    // see the stash comment in ObCJKWordWrapCheckUtf8 above), so nothing here
-    // relies on or conflicts with native's copy.
     permanentNode[5] = scratchNode[5];
     permanentNode[6] = scratchNode[6];
     permanentNode[7] = scratchNode[7];
@@ -274,7 +230,7 @@ static void __cdecl ObCJKSecondLoopCheckUtf8(BYTE* ediVal, DWORD ebpVal, DWORD e
     ObCJKGlyphEntry* glyph = ObCJKGlyphAtlas_GetGlyph(fontID, code);
     if (glyph && glyph->valid) {
         *(int*)(node + 0x24) = (int)glyph->gm.gmCellIncX;
-        *(int*)(node + 0x28) = (int)glyph->gm.gmBlackBoxY;
+        *(int*)(node + 0x28) = ObCJKNodeHeightFor(fontID, glyph);
         // Same +0x05/+0x06/+0x07 3-byte stash as ObCJKWordWrapCheckUtf8 above.
         for (int i = 1; i < seqLen; i++) {
             node[0x05 + (i - 1)] = buf[ebpVal + i];
@@ -306,28 +262,13 @@ static void ObCJKInstallSecondLoopHookUtf8()
     ObCJKInstallHook((BYTE*)kVA_SecondLoopUtf8, (void*)ObCJKSecondLoopHookUtf8, &g_secondLoopTrampUtf8, "SecondLoopUtf8");
 }
 
-// --- Fourth/sixth DBCS hooks (TrailByteGuard/TrailByteGuard2): NO UTF-8 ----
-// --- counterpart, intentionally omitted -----------------------------------
-//
-// obCJK_WordWrapHook.h's fourth and sixth hooks exist to stop native's '~'
-// hotkey-marker strip from firing on a byte that's really the trailing half
-// of a DBCS pair — that ambiguity exists ONLY because DBCS trail-byte ranges
-// (e.g. BIG5/GBK 0x40-0xFE) overlap 0x7E. UTF-8 continuation bytes are
-// strictly 0x80-0xBF, which never includes 0x7E — a 0x7E byte in UTF-8 text
-// can only ever be a genuine, standalone ASCII '~'. Native's own strip is
-// therefore always correct here and installing a guard hook would be a
-// no-op wrapped in dead code. obCJK_LootMenuTrailByteFixHook.h's paragraph
-// makes the same observation for a sibling bug.
+// --- TrailByteGuard/TrailByteGuard2: no UTF-8 counterpart (0x7E is never a
+// --- continuation byte) ---------------------------------------------------
 
 // --- Fifth hook: smart-quote substitution guard (kVA_SmartQuoteGuard) -----
-// Native's jump table unconditionally substitutes byte values 0x91-0x94
-// with ASCII '/" — those values DO fall inside UTF-8's continuation-byte
-// range (0x80-0xBF), so (unlike the '~' guards above) this ambiguity is
-// real: a genuine continuation byte can legitimately hold 0x91-0x94.
-// Disambiguation is backward-looking (continuation bytes only ever appear
-// mid/end-of-sequence, never as a sequence start) via
-// ObCJKUtf8FindGenuineLeadForIdx, replacing DBCS's forward lead+trail pair
-// check.
+// Fix: native's jump table replaces bytes 0x91-0x94 with ASCII '/", which
+// corrupts UTF-8 continuation bytes in that range. Skips the substitution
+// when the byte belongs to a valid sequence (ObCJKUtf8FindGenuineLeadForIdx).
 
 static const DWORD kVA_SmartQuoteGuardUtf8      = 0x00575F8A;
 static const DWORD kVA_SmartQuoteSkipTargetUtf8 = 0x00575FAE;  // def_575F9B convergence point (also kVA_PreMeasureUtf8, the eighth hook below)
@@ -357,7 +298,7 @@ static __declspec(naked) void ObCJKSmartQuoteGuardHookUtf8()
         popad
         cmp  byte ptr [g_sqTakeSkipUtf8], 0
         jz   short sq_native_utf8
-        mov  byte ptr [esp+0x12], al   ; replay the native store the trampoline would have done — same rationale as DBCS's ObCJKSmartQuoteGuardHook
+        mov  byte ptr [esp+0x12], al   ; replay the native store the trampoline would have done
         mov  edx, kVA_SmartQuoteSkipTargetUtf8
         jmp  edx
 sq_native_utf8:
@@ -372,27 +313,12 @@ static void ObCJKInstallSmartQuoteGuardHookUtf8()
 }
 
 // --- Seventh hook: forced line-split mid-pair guard (kVA_LineSplitPair) ---
-// Native writes exactly 2 bytes ('-','\n') into p[-2]/p[-1] and (on its own
-// unmodified path) relocates 2 more into p[0]/p[1] — i.e. native's own
-// footprint already reaches p[+2]. Generalizing to an N-byte in-progress
-// UTF-8 run (N=2/3/4, possibly only partially collected so far — see below)
-// by relocating the whole run to just past '-'/'\n' always lands the far end
-// at p[-N+2 + (N-1)] = p[+1], REGARDLESS of N — one byte short of what
-// native's own unmodified branch already requires. So no buffer growth is
-// ever needed; the earlier "no mechanism to grow the destination buffer"
-// concern doesn't apply once the write footprint is derived this way.
-//
-// The run doesn't need to be a COMPLETE sequence either: if only the lead +
-// some prefix of its continuation bytes have been written so far (e.g. a
-// 3-byte CJK sequence caught after 2 of 3 bytes), relocating that partial
-// prefix is enough. The outer per-byte loop resumes
-// writing the remaining continuation byte(s) right after the relocated
-// prefix (same "esi += 2" native continuation this hook already jumps to),
-// so the sequence ends up contiguous either way.
-//
-// Reuses ObCJKUtf8FindGenuineLeadForIdx (already used by PreMeasure) to
-// find the lead byte covering p[-1], instead of the old hardcoded
-// p[-2]/p[-1] 2-byte-only check.
+// Fix: native's forced break writes '-','\n' at p[-2]/p[-1], splitting an
+// in-progress UTF-8 sequence. When p[-1] is a continuation byte, this
+// moves the already-written N-byte run (N=2..4, may be partial) forward by
+// 2 and writes '-'/'\n' in front of it. The far end lands at p[+1], within
+// native's own write footprint (p[+2]), so no buffer growth is needed. The
+// outer loop then appends any remaining continuation bytes contiguously.
 
 static const DWORD kVA_LineSplitPairUtf8 = 0x0057616E;
 
@@ -405,11 +331,8 @@ static void __cdecl ObCJKLineSplitPairCheckUtf8(BYTE* ediVal, DWORD esiVal, DWOR
     g_lspForceSkipUtf8 = false;
     if (esiVal < 1) return;  // nothing written yet to examine
 
-    // p[-1] must itself be a continuation byte for there to be anything to
-    // protect — if it's ASCII or a fresh lead byte with no continuation
-    // written yet, native's unmodified relocation is already harmless (the
-    // "don't care" byte it moves to p[+2] gets overwritten by the very next
-    // real byte the outer loop appends there anyway).
+    // Only needed when p[-1] is a continuation byte; otherwise native's
+    // relocation is harmless.
     DWORD leadIdx;
     int   seqLen;
     if (!ObCJKUtf8FindGenuineLeadForIdx(ediVal, esiVal - 1, &leadIdx, &seqLen)) return;
@@ -417,9 +340,7 @@ static void __cdecl ObCJKLineSplitPairCheckUtf8(BYTE* ediVal, DWORD esiVal, DWOR
     DWORD N = esiVal - leadIdx;  // bytes of the run already committed (2..4)
     BYTE* p = ediVal + esiVal;   // &v6[v22]
 
-    // Shift the N-byte run forward by 2, high-to-low so N==3/4's overlapping
-    // source/destination windows don't self-clobber (equivalent to memmove
-    // moving to a higher address).
+    // Shift the N-byte run forward by 2, high-to-low (overlapping windows).
     for (DWORD i = N; i-- > 0; ) {
         p[(int)i - (int)N + 2] = p[(int)i - (int)N];
     }
@@ -441,7 +362,7 @@ static __declspec(naked) void ObCJKLineSplitPairHookUtf8()
         popad
         cmp  byte ptr [g_lspForceSkipUtf8], 0
         jz   short lsp_native_utf8
-        mov  edx, 0x0057617F     ; shared continuation past both native writes, same target as DBCS's ObCJKLineSplitPairHook
+        mov  edx, 0x0057617F     ; continuation past both native writes
         jmp  edx
 lsp_native_utf8:
         jmp  dword ptr [g_lspTrampUtf8]
@@ -455,12 +376,11 @@ static void ObCJKInstallLineSplitPairHookUtf8()
 }
 
 // --- Eighth hook: CENTER/RIGHT-align pre-measurement (kVA_PreMeasure) -----
-// Same three-case structure as DBCS's ObCJKPreMeasureCheck, but the
-// "structurally the trailing half of a real pair" case (Case 1) is now a
-// genuine backward continuation-byte lookup (any position within a 2/3/4
-// byte sequence, not just position 1-of-2) via
-// ObCJKUtf8FindGenuineLeadForIdx, and Case 2's lead check needs no parity
-// walk (ObCJKUtf8ValidSeqLenAt on a non-continuation byte is unambiguous).
+// Fix: sub_575B40's per-byte width accumulation (feeds CENTER/RIGHT-align
+// start x) uses native single-byte widths. Overrides each byte's width:
+//   Case 1: continuation byte of a counted sequence -> 0
+//   Case 2: multi-byte lead -> substituted glyph's advance
+//   Case 3: ASCII with AsciiRenderEnable -> substituted glyph's advance
 
 static const DWORD kVA_PreMeasureUtf8           = 0x00575FAE;
 static const DWORD kVA_PreMeasureAccumulateUtf8 = 0x00575FDF;  // native "add ebx,eax", reused unmodified
@@ -482,15 +402,11 @@ static void __cdecl ObCJKPreMeasureCheckUtf8(DWORD espSnapshot)
     BYTE current = srcPtr[idx];
     if (current == 0) return;  // terminator — native handles it
 
-    // Same unconditional var_494 replicate as DBCS's ObCJKPreMeasureCheck —
-    // see that function's comment for the downstream 0x57620D re-read this
-    // guards against desyncing.
+    // Fix: replicate native's var_494 store unconditionally (re-read at
+    // 0x57620D).
     *(DWORD*)(espSnapshot + 0x50) = (DWORD)current * 56;
 
-    // --- Case 1: idx sits on a continuation byte of an already-counted
-    // sequence (its width was added when the sequence's LEAD position
-    // fired) -> contribute 0. Checked first, unconditionally on current's
-    // own value, same ordering rationale as DBCS Case 1.
+    // --- Case 1: continuation byte of an already-counted sequence -> 0.
     DWORD leadIdx = 0;
     int   leadSeqLen = 0;
     if (ObCJKUtf8FindGenuineLeadForIdx(srcPtr, idx, &leadIdx, &leadSeqLen)) {
@@ -504,10 +420,10 @@ static void __cdecl ObCJKPreMeasureCheckUtf8(DWORD espSnapshot)
                 g_pmForceWidthUtf8 = true;
             }
         }
-        return;  // structurally a continuation byte -> never also an ASCII candidate
+        return;
     }
 
-    // --- Case 2: genuine, currently-unpaired multi-byte lead byte ---
+    // --- Case 2: multi-byte lead byte ---
     int fullSeqLen = ObCJKUtf8ValidSeqLenAt(srcPtr, idx);
     if (fullSeqLen >= 2) {
         int fontID = ObCJKFontIDFromInfoPtr(fontInfoPtr);
@@ -520,12 +436,11 @@ static void __cdecl ObCJKPreMeasureCheckUtf8(DWORD espSnapshot)
                 g_pmForceWidthUtf8 = true;
             }
         }
-        return;  // lead byte -> never also an ASCII candidate
+        return;
     }
 
-    // --- Case 3: plain ASCII byte. current > 0x7F here only via a
-    // malformed/truncated sequence (both cases above failed) — leave to
-    // native rather than guessing.
+    // --- Case 3: plain ASCII byte. current > 0x7F here = malformed
+    // sequence, left to native.
     if (current > 0x7F) return;
     int fontID = ObCJKFontIDFromInfoPtr(fontInfoPtr);
     if (fontID < 0 || ObCJKIsFontIDExcluded(fontID)) return;

@@ -1,23 +1,12 @@
 #pragma once
-// Native (non-popup-process) IME path: a small blocking input bar drawn as a
-// plain Win32 window, not the game's own D3D surface. Counterpart to
-// obCJK_IME_Out.h (external process window). See IME輸入設計.md.
+// Native IME path: a small blocking input bar as a plain Win32 window
+// (counterpart to obCJK_IME_Out.h's external process window).
 //
-// Design mirrors obtc.dll's own IME dialog (reverse-engineered via IDA,
-// sub_10006E00/sub_10007030/sub_1000715D): capture+darken a screenshot as a
-// backdrop, pop a small Edit-control bar with the OS IME attached, and block
-// the calling thread until the user confirms/cancels. obtc used a resource
-// dialog template (DialogBoxParamA); this reimplementation gets the same
-// "freeze + in-window input bar" effect from a plain RegisterClass/
-// CreateWindow + manual message loop instead, so no .rc/resource-compiler
-// wiring is needed. Blocking is what produces the freeze — the calling
-// thread is the game's own main thread (this runs from PerFrameTask), so
-// nothing else in the engine can run until the bar closes, exactly like
-// obtc's DialogBoxParamA modal loop. Since the bar is an ordinary GDI
-// window (not a D3D exclusive-mode surface), the system IME candidate/
-// composition UI can always render over it regardless of the game's
-// fullscreen mode — this sidesteps the once-open question of whether IME
-// candidate windows can display over Oblivion's D3D surface directly.
+// A dimmed screenshot strip is the backdrop; an Edit control with the OS IME
+// attached sits on top. The modal message loop runs on the game's main
+// thread (from PerFrameTask), so the game freezes until the bar closes.
+// Being an ordinary GDI window, the IME candidate/composition UI can draw
+// over it in any fullscreen mode.
 #include <windows.h>
 #include <imm.h>
 #include "common/IDebugLog.h"
@@ -57,11 +46,8 @@ static void ObCJKImeInEnsureClass(HINSTANCE hInst)
     s_registered = true;
 }
 
-// Captures a strip of the game's current screen and halves every channel's
-// brightness (same "dim the frozen frame" trick obtc used, done here with a
-// DIB byte loop instead of obtc's raw MMX asm) to use as the input bar's
-// backdrop, so the bar reads as an overlay on the paused frame rather than a
-// plain gray box.
+// Captures a strip of the game's current screen at half brightness as the
+// input bar's backdrop brush.
 static HBRUSH ObCJKImeInMakeBackdrop(HWND gameWnd, int width, int height, HBITMAP* outBmp)
 {
     HDC hdcScreen = GetDC(gameWnd);
@@ -100,8 +86,6 @@ static HBRUSH ObCJKImeInMakeBackdrop(HWND gameWnd, int width, int height, HBITMA
 
 // Blocking: opens the input bar, waits for the user to confirm (Enter) or
 // cancel (Escape), injects the text on confirm, then tears everything down.
-// The call not returning until the bar closes is exactly what freezes the
-// game — see the top-of-file comment.
 static void ObCJKImeInRunModal(HWND gameWnd, HINSTANCE hInst, ObCJKCodePage cp)
 {
     ObCJKImeInEnsureClass(hInst);
@@ -153,16 +137,8 @@ static void ObCJKImeInRunModal(HWND gameWnd, HINSTANCE hInst, ObCJKCodePage cp)
     if (confirmed) {
         char buf[512] = {};
         int len;
-        // [UTF-8] The Edit control (created below via CreateWindowExA) is an
-        // ANSI window, so its text is already committed through CP_ACP by
-        // the time any key/IME composition message lands in it — that part
-        // is unchanged and unrelated to which encoding we want out. But
-        // GetWindowTextA re-encodes the control's UTF-16 storage through
-        // CP_ACP too on the way OUT, and Windows has no "system ANSI
-        // codepage = UTF-8" setting, so it can never hand back UTF-8 bytes.
-        // Under kCP_UTF8 we read the wide text directly and do the CP_UTF8
-        // conversion ourselves; every other (DBCS) codepage keeps the
-        // original GetWindowTextA call unchanged.
+        // Fix: GetWindowTextA always returns CP_ACP bytes, never UTF-8. Under
+        // UTF-8 read the wide text and convert with CP_UTF8.
         if (cp == kCP_UTF8) {
             WCHAR wbuf[512] = {};
             int wlen = GetWindowTextW(g_imeInEditWnd, wbuf, 512);
@@ -189,10 +165,7 @@ static void ObCJKImeInRunModal(HWND gameWnd, HINSTANCE hInst, ObCJKCodePage cp)
     if (g_imeInBackdropBmp)   { DeleteObject(g_imeInBackdropBmp);   g_imeInBackdropBmp   = NULL; }
 }
 
-// Per-frame hotkey handler: edge-triggered. ObCJKImeInRunModal blocks until
-// the bar closes, so this call itself does not return until the user is
-// done typing — that block is what pauses the game (see top-of-file
-// comment), no separate pause logic is needed.
+// Per-frame hotkey handler, edge-triggered; blocks while the bar is open.
 static void ObCJKImeInPerFrame(HWND hWnd, ObCJKCodePage cp, bool imeKeyDown, bool& imeKeyWasDown)
 {
     if (imeKeyDown && !imeKeyWasDown && hWnd)

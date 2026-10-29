@@ -1,9 +1,6 @@
 #pragma once
-// CJK kinsoku (line-break prohibition) rule table — obCJK's own design, not
-// ported from obtc.dll (its data table is confirmed dead code for BIG5).
-// Design/derivation: 01_文字繪製呼叫鏈.md「五、」節. Wired into the
-// wrapwidth-overflow decision by obCJK_LineBreakHook.h (sub_577840 VA
-// 0x577946) — see that header for the hook itself.
+// DBCS kinsoku (line-break prohibition) rule table, used by the
+// wrapwidth-overflow decision in obCJK_LineBreakHook.h (sub_577840 VA 0x577946).
 #include <windows.h>
 #include <stdlib.h>
 #include "obCJK_Encoding.h"
@@ -21,18 +18,16 @@ struct ObCJKLineBreakEntry {
 // Canonical rule set in Unicode, converted per-codepage at runtime via
 // WideCharToMultiByte instead of hand-transcribing byte tables.
 static const wchar_t kObCJKForbidStartChars[] =
-    L"）］｝〉》」』】〕｠"  // ) ] } 〉 》 」 』 】 〕 ﹠
-    L"、。，．；：？！"              // 、。，．；：？！
-    L"…‥～’”"                                 // …‥～’”
-    L"々〆・·";                                      // 々〆・·
+    L"）］｝〉》」』】〕｠"
+    L"、。，．；：？！"
+    L"…‥～’”"
+    L"々〆・·";
 static const wchar_t kObCJKForbidEndChars[] =
-    L"（［｛〈《「『【〔｟"  // ( [ { 〈 《 「 『 【 〔 ﹝
-    L"‘“";                                                  // ‘“
+    L"（［｛〈《「『【〔｟"
+    L"‘“";
 
-// Built lazily on first lookup, keyed to whatever g_activeCodePage currently
-// is. main.cpp reads ActiveCodePage once at startup and never changes it at
-// runtime today, so this only ever rebuilds once; ObCJKLineBreakRule_Invalidate()
-// is here in case that stops being true later.
+// Built lazily on first lookup for the current g_activeCodePage; rebuilt if
+// it changes or after ObCJKLineBreakRule_Invalidate().
 static ObCJKLineBreakEntry g_lineBreakTable[128];
 static ObCJKCodePage  g_lineBreakBuiltFor = (ObCJKCodePage)-1;
 
@@ -64,7 +59,7 @@ static void ObCJKAddLineBreakFlag(WORD code, BYTE flag)
             return;
         }
     }
-    if (g_lineBreakCount >= cap) return;  // table sized generously (128) for ~40 entries, shouldn't happen
+    if (g_lineBreakCount >= cap) return;
     g_lineBreakTable[g_lineBreakCount].code  = code;
     g_lineBreakTable[g_lineBreakCount].flags = flag;
     g_lineBreakCount++;
@@ -73,7 +68,7 @@ static void ObCJKAddLineBreakFlag(WORD code, BYTE flag)
 static void ObCJKBuildLineBreakTable(ObCJKCodePage cp)
 {
     g_lineBreakCount = 0;
-    UINT winCP = (UINT)cp;  // kCP_BIG5=950 etc. (obCJK_Encoding.h) are real Windows codepage IDs
+    UINT winCP = (UINT)cp;  // ObCJKCodePage values are Windows code page IDs
     for (const wchar_t* p = kObCJKForbidStartChars; *p; p++)
         ObCJKAddLineBreakFlag(ObCJKEncodeCharToCodePage(*p, winCP), kObCJKForbidLineStart);
     for (const wchar_t* p = kObCJKForbidEndChars; *p; p++)

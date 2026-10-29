@@ -356,8 +356,7 @@ static UInt8 ParseGamepadButton(const char* str, UInt8 def)
     return (UInt8)v;
 }
 
-// Keyboard hotkey modifier: 0=None, 1=Ctrl, 2=Shift。手把binding不使用這個欄位
-// （組合鍵binding有自己獨立的 comboModifierButton，見 HotkeySettings）。
+// 鍵盤熱鍵修飾鍵：0=None, 1=Ctrl, 2=Shift（只用於鍵盤binding）。
 static UInt8 ParseHotkeyModifier(const char* str, UInt8 def)
 {
     if (!str || !str[0])            return def;
@@ -367,9 +366,7 @@ static UInt8 ParseHotkeyModifier(const char* str, UInt8 def)
     return def;
 }
 
-// GamepadHold 專用: 按住秒數(可含小數，如"1.5")。限制在0.1~10秒之間，避免
-// ini被手動改壞成0(瞬間觸發，等同沒有長按判斷)或超大值(事實上永遠按不到)。
-// 不用strtof——跟本檔其餘Parse*函式一致，手刻逐字元解析,不依賴CRT locale。
+// 手把長按秒數(可含小數，如"1.5")，限制在0.1~10秒。逐字元解析，不依賴CRT locale。
 static float ParseHotkeyHoldSeconds(const char* str, float def)
 {
     if (!str || !str[0]) return def;
@@ -389,13 +386,9 @@ static float ParseHotkeyHoldSeconds(const char* str, float def)
     return v;
 }
 
-// 一組熱鍵(Editor或Ime)的完整設定 — 鍵盤/手把長按/手把組合鍵 3 組互不排斥的
-// 獨立binding，可以同時生效(見 main.cpp IsHotkeyDown())，不再是舊版「三選一」
-// 的Device欄位。每組binding各自有Disabled旗標(對應obCJK_iniEdit.py
-// MultiHotkeyCapture的3個「停用」勾選框)；allDisabled是總開關(對應「全部
-// 停用」勾選框)，開啟時這組熱鍵(Editor或Ime)不論哪個裝置都不會觸發。
-// holdStartTick是執行期狀態(不是ini設定，每次GetTickCount()更新)，只有
-// holdDisabled==false時才有意義，見 obCJK_Gamepad.h IsGamepadButtonHeldFor()。
+// 一組熱鍵(Editor或Ime)的完整設定：鍵盤/手把長按/手把組合鍵 3 組獨立binding，
+// 可同時生效(見 main.cpp IsHotkeyDown())。各組有自己的Disabled旗標，
+// allDisabled為總開關。
 struct HotkeySettings {
     // 鍵盤binding
     UInt16 kbdCode;
@@ -406,7 +399,7 @@ struct HotkeySettings {
     UInt8  holdButton;
     float  holdSeconds;
     bool   holdDisabled;
-    DWORD  holdStartTick;         // 執行期狀態，非ini
+    DWORD  holdStartTick;         // 執行期狀態(非ini)，見 obCJK_Gamepad.h IsGamepadButtonHeldFor()
 
     // 手把組合鍵binding：修飾鍵(左)held+主鍵(右)held同時成立才觸發
     UInt8  comboButton;           // 主鍵(右)

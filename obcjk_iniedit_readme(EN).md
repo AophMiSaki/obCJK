@@ -91,9 +91,10 @@ modes, so you don't need to change how you operate the tool based on which mode 
 
 ### 5. Font Parameters (present in both the half-width/full-width rows of every SLOT/NorthernUI role tab)
 
-- **Width**: Adjusts the horizontal cell width each character occupies (unit: pixels). 0 means
-  use the font's own natural measured width; a positive value stretches/compresses every
-  character to fit that pixel-wide cell (not including character spacing).
+- **Width**: Corresponds to GDI's `lfWidth` (unit: pixels). 0 means use the font's own natural
+  width; a positive value scales the glyph and its advance horizontally relative to the font's
+  average character width (scale = Width ÷ average width), rather than forcing every
+  character into a fixed-width cell (not including character spacing).
 - **Height**: Adjusts the overall character size (unit: pixels, i.e. the GDI font's lfHeight).
 - **Spacing**: Adjusts the extra gap between characters (unit: pixels). A negative value packs
   characters tighter together; a positive value increases the gap between characters.
@@ -112,6 +113,29 @@ modes, so you don't need to change how you operate the tool based on which mode 
 Each row has two buttons on the right: "Apply Selection" (applies the font name currently
 selected in the font list to this row) and "Reset" (restores this row to the built-in default
 for this encoding/SLOT).
+
+### 5-1. Disable Full-width (full-width row only)
+To the right of the font name field on the full-width row there is a "Disable Full-width"
+checkbox, which writes the ini key `FontParam<N>_2_Disable` (0/1, default 0). When checked:
+- Every control on the full-width row (font name, Apply Selection, Width/Height/Spacing/
+  Y Offset/Weight Density/Boldness/Contrast/Italic) is greyed out and not editable; the
+  half-width row, outline/shadow and line gap are unaffected.
+- The full-width row of that SLOT / role no longer counts toward the line height (see 5-2).
+- On save, the full-width row's font name is no longer checked against the system font list.
+- Unchecking it restores editing of the full-width row.
+
+### 5-2. Line Gap (shared per SLOT / role tab)
+Located below the full-width block and above Outline/Shadow. This is a **per-SLOT setting
+shared by both rows** (one value for half-width and full-width); each SLOT / role tab has its
+own.
+- **Range**: -10 to +10 (unit: pixels), default 0; out-of-range values are clamped.
+- **ini key written**: `FontParam<N>_LineGap`, in the same section as `FontParam<N>_1`/`_2`.
+- **Line height**: line height = max(half-width cell height, full-width cell height) + Line
+  Gap, with a minimum of 1. A row is left out of the max when the half-width row uses the
+  "game native font" or the full-width row has "Disable Full-width" checked. The cell height
+  is the row's "Height" value.
+- When the line gap is negative or the line pitch is smaller than the cell height, the preview
+  marks the overlap between adjacent lines in red (see 9).
 
 ### 6. Outline/Shadow
 Located below the full-width block and above the preview on each SLOT / NorthernUI role tab.
@@ -163,6 +187,19 @@ Japanese small kana, etc.); regular full-width CJK characters are unaffected:
 ### 9. Preview
 The canvas below live-previews the style of the currently selected font with the above
 parameters applied (this is only an approximate preview, not the actual in-game rendering).
+- **Color blocks and legend**: A legend sits at the top of the canvas. Blue = cell range (the
+  font's Height × Width cell); orange = line gap (the extra space below the cell); red = line
+  overlap (the area where adjacent lines overlap when the line pitch is smaller than the cell
+  height).
+- **Width**: Scales each character's advance and cell width relative to the GDI average
+  character width. The Tk canvas cannot scale glyph shapes themselves, so glyphs keep their
+  natural width; only the spacing and cell follow the Width value.
+- **Y Offset**: Applied in the preview (positive = up, negative = down), and the text top is
+  aligned to the game's cell top.
+- **Row used**: The whole preview text is drawn with the font and parameters of a single row,
+  not half-width/full-width separately. The full-width row is used by default; when
+  "Disable Full-width" is checked and the half-width row is not using the native font, the
+  half-width row is used instead.
 
 ---
 
@@ -262,4 +299,5 @@ are editing) — the two do not affect each other.
 The "Save ini" button at the bottom of the window writes all current settings (across all
 tabs) back to the same `obCJK.ini` file at once (UTF-8 encoding). If a filled-in font name
 cannot be found in the system's font list, a confirmation prompt appears before saving, but
-you may still choose to save anyway.
+you may still choose to save anyway. A row is skipped by this check when the half-width row
+uses the "game native font" or the full-width row has "Disable Full-width" checked.

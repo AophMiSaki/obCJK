@@ -1,15 +1,7 @@
 #pragma once
-// UTF-8 counterpart of obCJK_LineBreakRule.h. Per the 2026-07-18 architecture
-// decision (memory obcjk-utf8-plan), this file shares no logic with the DBCS version.
-//
-// Structurally simpler than the DBCS table: that file has to round-trip each
-// Unicode rule character through WideCharToMultiByte into the active DBCS
-// codepage (BYTE buf[2], (lead<<8)|trail) because native/hook code only ever
-// sees raw codepage bytes. UTF-8 hook code decodes straight to a Unicode
-// codepoint (obCJK_WordWrapHook_UTF8.h's ObCJKUtf8Decode), so this table can
-// key directly on the codepoint the rule characters already are — no
-// encode/decode round-trip, and no per-codepage rebuild (the table is the
-// same regardless of which legacy codepage the game happens to also support).
+// UTF-8 kinsoku (line-break) table, separate from obCJK_LineBreakRule.h
+// (no shared logic). Keyed directly by Unicode codepoint (UTF-8 hooks decode
+// to codepoints), so it is built once and never re-encoded per code page.
 #include <windows.h>
 #include <stdlib.h>
 
@@ -23,10 +15,8 @@ struct ObCJKLineBreakEntryUtf8 {
     BYTE  flags;  // ObCJKLineBreakFlagUtf8 bitmask
 };
 
-// Same rule set as obCJK_LineBreakRule.h's kObCJKForbidStartChars/
-// kObCJKForbidEndChars (duplicated, not shared, per the architecture
-// decision above) — every character here is BMP, so a plain wchar_t->DWORD
-// widen is a lossless codepoint value on Windows' UTF-16 wchar_t.
+// Same rule set as obCJK_LineBreakRule.h (duplicated). All BMP, so
+// wchar_t -> DWORD is the codepoint.
 static const wchar_t kObCJKForbidStartCharsUtf8[] =
     L"）］｝〉》」』】〕｠"
     L"、。，．；：？！"
@@ -57,7 +47,7 @@ static void ObCJKAddLineBreakFlagUtf8(DWORD codepoint, BYTE flag)
             return;
         }
     }
-    if (g_lineBreakCountUtf8 >= cap) return;  // table sized generously (128) for ~40 entries, shouldn't happen
+    if (g_lineBreakCountUtf8 >= cap) return;
     g_lineBreakTableUtf8[g_lineBreakCountUtf8].codepoint = codepoint;
     g_lineBreakTableUtf8[g_lineBreakCountUtf8].flags     = flag;
     g_lineBreakCountUtf8++;

@@ -31,11 +31,8 @@ static bool IsGamepadButtonDown(UInt8 whichJoystick, UInt8 controlIndex)
     return false;
 }
 
-// GamepadHold專用: 判斷 controlIndex 是否已經連續按住超過 seconds 秒。
-// pressStartTick 由呼叫端持有、跨幀保存(HotkeySettings::holdStartTick，見
-// obCJK_Path.h)——放開時歸零，按下的第一幀記錄起始tick，之後每幀比對經過
-// 時間。GetTickCount() 溢位(約49.7天)會讓那一瞬間的差值算錯，但影響僅
-// 一次判斷結果，下一幀就恢復正常，不處理。
+// GamepadHold: 判斷 controlIndex 是否已連續按住超過 seconds 秒。
+// pressStartTick 由呼叫端跨幀保存，放開時歸零、按下第一幀記錄起始 tick。
 static bool IsGamepadButtonHeldFor(UInt8 whichJoystick, UInt8 controlIndex, float seconds, DWORD& pressStartTick)
 {
     if (!IsGamepadButtonDown(whichJoystick, controlIndex)) {
@@ -47,12 +44,8 @@ static bool IsGamepadButtonHeldFor(UInt8 whichJoystick, UInt8 controlIndex, floa
     return (now - pressStartTick) >= (DWORD)(seconds * 1000.0f);
 }
 
-// ini key GamepadHotkeyEnable ([obCJK] 節，obCJK_iniEdit.py 熱鍵設定區的
-// 開關) — 預設關閉（0）。main.cpp 的 IsHotkeyDown() 只在這個回傳 true 時才
-// 真的去查手把狀態；關閉時即使某個熱鍵的 Device 選了 Gamepad 也不會生效，
-// 純鍵盤玩家可以完全跳過每幀查手把狀態的開銷。沿用 obCJK_GlyphHook.h
-// ObCJKPathDiagEnabled() 同款 lazy-static 快取（見該檔案註解：只在第一次
-// 呼叫時讀 ini，之後不會隨編輯器存檔即時重載）。
+// 讀 [obCJK] GamepadHotkeyEnable（預設 0）；關閉時熱鍵不查手把狀態。
+// 只在第一次呼叫時讀 ini，不隨存檔熱重載。
 static bool ObCJKGamepadHotkeyEnabled()
 {
     static int cached = -1;
@@ -61,8 +54,7 @@ static bool ObCJKGamepadHotkeyEnabled()
     return cached != 0;
 }
 
-// obCJK_iniEdit.py _XBOX_BUTTON_NAMES 的 C++ 端對照，只用於下面的 DEBUG log
-// 訊息好讀，不影響任何判斷邏輯。
+// controlIndex → Xbox 按鈕名稱，只供 debug log 顯示。
 static const char* GamepadControlIndexName(UInt8 idx)
 {
     switch (idx) {
@@ -75,15 +67,9 @@ static const char* GamepadControlIndexName(UInt8 idx)
     }
 }
 
-// ini key GamepadInputDiagEnable ([obCJK] 節，選項頁 DEBUG 區的開關) —
-// 預設關閉（0）。開啟後每幀掃描 joystick 0 的全部 36 個 controlIndex
-// （0-31按鈕/32-35十字鍵，跟 IsGamepadButtonDown() 同一套編號），
-// 用來驗證按鈕/十字鍵等偵測邏輯有沒有正確對到玩家實際按下的按鍵，跟
-// GamepadHotkeyEnable 是否開啟無關(這樣才能在還沒開熱鍵前就先確認手把
-// 能不能被正確辨識)。第一次偵測到有手把時，log 開頭先印一行裝置識別資訊
-// （名稱/VID:PID），方便對照使用者回報的log時知道當下測試的是哪支手把。
-// log 行數上限固定300行，跟其他 DiagCap 系列的預設同一個量級，避免長時間
-// 開著洗版obCJK.log。
+// Debug log：讀 [obCJK] GamepadInputDiagEnable（預設 0），與 GamepadHotkeyEnable 無關。
+// 開啟後每幀掃描 joystick 0 的 36 個 controlIndex（0-31 按鈕／32-35 十字鍵），
+// 記錄按下事件；首次先印裝置名稱與 VID:PID，上限 300 行。
 static bool ObCJKGamepadInputDiagEnabled()
 {
     static int cached = -1;

@@ -2,31 +2,17 @@
 // UTF-8 counterpart of obCJK_GlyphHook.h — hooks the identical three native
 // "draw one glyph" call sites (Path A: sub_576670 @0x576919, Path B:
 // sub_575870 @0x575A48, Path C: sub_576AB0 @0x576CD1) but decodes
-// variable-length UTF-8 sequences (2/3/4 bytes) instead of assuming a fixed
-// DBCS lead/trail pair. Per the 2026-07-18 architecture decision , 
-// every hook/state symbol below is independently named (Utf8 suffix)
-// so both headers coexist in the same translation unit; 
-// only one path's Install*HookUtf8()/Install*Hook()
-// is ever actually called (ini utf8-mode switch), so the two never run
-// concurrently on the same VA.
+// variable-length UTF-8 sequences (2/3/4 bytes) instead of a DBCS lead/trail
+// pair. All symbols carry a Utf8 suffix so both headers coexist; only one
+// set of Install*Hook is called (by ActiveCodePage), never both.
 //
-// Reused from obCJK_GlyphHook.h (DBCS) without duplication — same
-// "encoding-agnostic utility, not per-encoding disambiguation logic"
-// rationale obCJK_WordWrapHook_UTF8.h already applies to that file's
-// ObCJKFontIDFromInfoPtr reuse: ObCJKFontIDFromInfoPtr/ObCJKFontInfoPtrFromID
-// (pure FontManager slot-array <-> fontID lookups), ObCJKIsPlausiblePtr
-// (guard-page sanity check), ObCJKPathDiagEnabled/ObCJKPathDiagCap (ini
-// diagnostic settings). Reused from obCJK_WordWrapHook_UTF8.h: the UTF-8
-// decode helpers (ObCJKUtf8ValidSeqLenAt/ObCJKUtf8Decode/
-// ObCJKUtf8CodeForGlyph/ObCJKUtf8FindGenuineLeadForIdx) — these ARE
-// UTF-8-specific disambiguation logic, but reusing them across UTF-8 files
-// only (never across the DBCS/UTF-8 boundary) keeps one correctness-critical
-// implementation instead of three copies that could drift.
+// Reuses encoding-independent helpers from obCJK_GlyphHook.h (fontID
+// lookups, ObCJKIsPlausiblePtr, PathDiag settings) and the UTF-8 decode
+// helpers from obCJK_WordWrapHook_UTF8.h.
 //
-// node+0x05/0x06/0x07 3-byte continuation-byte stash consumed by Path C
-// below (written by ObCJKWordWrapCheckUtf8/ObCJKSecondLoopCheckUtf8, carried
-// by ObCJKNodeCopyUtf8, all in obCJK_WordWrapHook_UTF8.h) — IDA-verified safe
-// range.
+// Path C reads continuation bytes from node+0x05..0x07, written by
+// obCJK_WordWrapHook_UTF8.h (ObCJKWordWrapCheckUtf8/ObCJKSecondLoopCheckUtf8,
+// carried by ObCJKNodeCopyUtf8).
 #include <windows.h>
 #include "common/IDebugLog.h"
 #include "obse/GameAPI.h"
@@ -45,13 +31,9 @@ static BYTE* g_pathBTrampUtf8 = nullptr;
 static BYTE* g_pathCTrampUtf8 = nullptr;
 
 // --- Path A: sub_576670, per-source-byte firing, no [idx+1] peek ----------
-// DBCS's g_paPendingLead spans exactly 2 firings (1 lead + 1 trail). UTF-8
-// sequences can be 2/3/4 bytes, so this needs a small buffer + running count
-// instead of a single pending byte: firings 1..(N-1) arm/extend the buffer
-// and draw a zero-size blank placeholder (native's own per-firing pen
-// bookkeeping stays consistent, same reason DBCS blanks the lead firing);
-// firing N (the last continuation byte) decodes the full buffer and
-// substitutes the real merged-width glyph.
+// Fires once per source byte. Bytes 1..N-1 of a sequence are buffered and
+// drawn as a zero-size placeholder (keeps native pen bookkeeping
+// consistent); byte N decodes the buffer and substitutes the real glyph.
 static ObCJKNativeGlyphEntry g_paBlankGlyphUtf8 = {};  // all-zero: width/height/advance=0
 
 static BYTE  g_paBufUtf8[4]       = { 0, 0, 0, 0 };
@@ -59,13 +41,10 @@ static int   g_paCollectedUtf8    = 0;   // bytes stashed in g_paBufUtf8 so far 
 static int   g_paTargetLenUtf8    = 0;   // 0 = no sequence in progress; else ObCJKUtf8SeqLen() of the armed lead
 static BYTE* g_paGlyphPtrUtf8     = nullptr;
 static bool  g_paIsCJKUtf8        = false;
-static DWORD g_paHitsUtf8         = 0;   // diagnostic line counter, gated against ObCJKPathDiagCap() — see DBCS g_paHits comment
+static DWORD g_paHitsUtf8         = 0;   // diag line counter, capped by ObCJKPathDiagCap()
 static DWORD g_paAsciiHitsUtf8    = 0;
 
-// [1-a] ASCII/half-width substitution — identical role to DBCS's
-// ObCJKPathAAsciiCheck (single byte, no multi-byte merge, same TexUpload
-// path). Duplicated rather than shared per the architecture decision; body
-// is intentionally near-identical.
+// ASCII/half-width substitution (single byte), same as DBCS's ObCJKPathAAsciiCheck.
 static void ObCJKPathAAsciiCheckUtf8(BYTE currentByte, void* fontInfoPtr)
 {
     int fontID = ObCJKFontIDFromInfoPtr(fontInfoPtr);
@@ -88,28 +67,20 @@ static void ObCJKPathAAsciiCheckUtf8(BYTE currentByte, void* fontInfoPtr)
     if (ready) {
         g_paGlyphPtrUtf8 = (BYTE*)&glyph->native;
         g_paIsCJKUtf8 = true;
-        // [line-height] shared with DBCS — see obCJK_GlyphHook.h's
-        // ObCJKPathAAsciiCheck for why the ASCII branch tracks
-        // g_paMaxLineHeight too (2026-07-31, widened alongside the CJK
-        // branch below to match obCJK_LineBreakHook.h's line+0x20 fix).
+        // Line height: shared g_paMaxLineHeight (obCJK_GlyphHook.h).
         int h = (int)glyph->gm.gmBlackBoxY;
         if (h > g_paMaxLineHeight) g_paMaxLineHeight = h;
     }
 }
 
-// `currentByte`/`fontInfoPtr` = `bl`/`edi` at hook VA 0x576919 — same
-// register-safety proof as DBCS's ObCJKPathACheck (edi set once at function
-// entry, unclobbered).
+// `currentByte`/`fontInfoPtr` = `bl`/`edi` at hook VA 0x576919.
 static void __cdecl ObCJKPathACheckUtf8(BYTE currentByte, void* fontInfoPtr)
 {
     g_paIsCJKUtf8 = false;
 
-    // slot4 exclusion guard, checked up front for the same reason as DBCS's
-    // ObCJKPathACheck: fontID can't be resolved mid-sequence, but by the
-    // final firing the earlier bytes would already have drawn as blank
-    // placeholders, which would delete the character instead of leaving it
-    // native. Abort any in-progress sequence so a subsequent (non-excluded)
-    // string doesn't inherit stale buffer state.
+    // Fix: slot4 is checked before buffering — otherwise its earlier bytes
+    // were drawn as blank placeholders and the character disappeared. Also
+    // drops any in-progress sequence.
     {
         int fontIDGuard = ObCJKFontIDFromInfoPtr(fontInfoPtr);
         if (fontIDGuard >= 0 && ObCJKIsFontIDExcluded(fontIDGuard)) {
@@ -156,26 +127,17 @@ static void __cdecl ObCJKPathACheckUtf8(BYTE currentByte, void* fontInfoPtr)
                 if (ready) {
                     g_paGlyphPtrUtf8 = (BYTE*)&glyph->native;
                     g_paIsCJKUtf8 = true;
-                    // [line-height] shared with DBCS — g_paMaxLineHeight
-                    // (obCJK_GlyphHook.h) is consumed+reset by the same
-                    // encoding-agnostic ObCJKPathALineHeightHook (VA
-                    // 0x5768c4, native code doesn't branch on encoding
-                    // mode). See that file's comment + PathA主要文字顯示.md
-                    // 第25節.
+                    // Line height: shared g_paMaxLineHeight, consumed by
+                    // ObCJKPathALineHeightHook (encoding-independent).
                     int h = (int)glyph->gm.gmBlackBoxY;
                     if (h > g_paMaxLineHeight) g_paMaxLineHeight = h;
                     return;
                 }
             }
-            // glyph not ready / no fontID — currentByte (the sequence's LAST
-            // continuation byte, always 0x80-0xBF) falls through to the fresh
-            // lead/ascii checks below, same as DBCS's "pending lead didn't pan
-            // out" path. Structurally a no-op there: a continuation byte can
-            // never satisfy ObCJKUtf8SeqLen()>=2 nor ObCJKUtf8IsAsciiCandidate,
-            // so this just leaves the byte to native (falls back to native).
+            // Not ready: the last continuation byte falls through below and
+            // matches neither check, so it is left to native.
         } else {
-            // fontID not otherwise resolved on this branch — resolve it here
-            // purely for the slot7/8-only diag filter below.
+            // fontID only needed for the diag slot filter.
             int fontID = ObCJKFontIDFromInfoPtr(fontInfoPtr);
             if (ObCJKPathDiagEnabled() && ObCJKPathDiagSlotAllowed(fontID) && g_paHitsUtf8 <= ObCJKPathDiagCap()) {
                 _WARNING("obCJK:PathA:MISS(broken-seq-utf8) expected continuation byte, got 0x%02X (targetLen=%d collected=%d) — "
@@ -198,15 +160,13 @@ static void __cdecl ObCJKPathACheckUtf8(BYTE currentByte, void* fontInfoPtr)
         return;
     }
 
-    // [1-a] not part of a CJK sequence — try ASCII/half-width substitution.
+    // Not part of a multi-byte sequence — try ASCII/half-width substitution.
     if (ObCJKUtf8IsAsciiCandidate(currentByte))
         ObCJKPathAAsciiCheckUtf8(currentByte, fontInfoPtr);
 }
 
-// Byte-for-byte identical replay to DBCS's ObCJKPathAGlyphHook (same hook
-// VA, same native instruction gap 0x576919-0x57696F, same esp-relative
-// offsets — this hook point's register layout doesn't depend on encoding).
-// See that function's comment for the offset derivation.
+// Same native replay as DBCS's ObCJKPathAGlyphHook (gap 0x576919-0x57696F,
+// same esp offsets).
 static __declspec(naked) void ObCJKPathAGlyphHookUtf8()
 {
     __asm {
@@ -277,8 +237,7 @@ static void ObCJKPathBAsciiCheckUtf8(BYTE currentByte, void* fontInfoPtr)
     }
 }
 
-// `buf`/`idx`/`fontInfoPtr` = `eax`/`esi`/`edi` at hook VA 0x575A48, same
-// register-safety proof as DBCS's ObCJKPathBCheck.
+// `buf`/`idx`/`fontInfoPtr` = `eax`/`esi`/`edi` at hook VA 0x575A48.
 static void __cdecl ObCJKPathBCheckUtf8(BYTE* buf, int idx, void* fontInfoPtr)
 {
     g_pbIsCJKUtf8 = false;
@@ -323,10 +282,8 @@ static void __cdecl ObCJKPathBCheckUtf8(BYTE* buf, int idx, void* fontInfoPtr)
     g_pbExtraAdvanceUtf8 = seqLen - 1;
 }
 
-// Byte-for-byte identical native replay to DBCS's ObCJKPathBGlyphHook,
-// except the fixed `add esi,1` becomes a dynamic `add esi,[g_pbExtraAdvanceUtf8]`
-// — same dynamic-step pattern obCJK_WordWrapHook_UTF8.h already uses for its
-// first/third hooks.
+// Same native replay as DBCS's ObCJKPathBGlyphHook, except `add esi,1`
+// becomes `add esi,[g_pbExtraAdvanceUtf8]`.
 static __declspec(naked) void ObCJKPathBGlyphHookUtf8()
 {
     __asm {
@@ -376,10 +333,8 @@ static bool  g_pcIsCJKUtf8    = false;
 static DWORD g_pcHitsUtf8     = 0;
 static DWORD g_pcAsciiHitsUtf8 = 0;
 
-// [1-a] ASCII/half-width substitution, same idea as ObCJKPathAAsciiCheckUtf8.
-// Path C has no esi/index bookkeeping (each node already represents exactly
-// one logical character), so reusing g_pcIsCJKUtf8 for both "substitute" and
-// "is a real sequence" is safe — no extra-skip side effect gated on it.
+// ASCII/half-width substitution. Each Path C node is one character (no index
+// skip), so g_pcIsCJKUtf8 alone means "substitute".
 static void ObCJKPathCAsciiCheckUtf8(BYTE* node, BYTE currentByte)
 {
     DWORD imgField = *(DWORD*)(node + 0x1C);
@@ -410,12 +365,8 @@ static void ObCJKPathCAsciiCheckUtf8(BYTE* node, BYTE currentByte)
 }
 
 // `node` (`esi` at hook VA 0x576CD1): +0x00=font ID, +0x04=lead byte,
-// +0x05/+0x06/+0x07=up to 3 continuation bytes (stashed by
-// ObCJKWordWrapCheckUtf8/ObCJKSecondLoopCheckUtf8, carried across scratch->
-// permanent copy by ObCJKNodeCopyUtf8 — all in obCJK_WordWrapHook_UTF8.h),
-// +0x1C=IMG-override pointer (non-zero -> skip). Same node-format proof as
-// DBCS's ObCJKPathCCheck (Hook內容與規範.md「一、」), extended per the
-// IDA cross-check documented in memory obcjk-utf8-plan.
+// +0x05/+0x06/+0x07=up to 3 continuation bytes (see top comment),
+// +0x1C=IMG-override pointer (non-zero -> skip).
 static void __cdecl ObCJKPathCCheckUtf8(BYTE* node)
 {
     g_pcIsCJKUtf8 = false;
@@ -430,11 +381,8 @@ static void __cdecl ObCJKPathCCheckUtf8(BYTE* node)
         return;
     }
 
-    // Validate node[5..7]'s (seqLen-1) continuation bytes before trusting
-    // them — node is populated by a different hook (WordWrapHook_UTF8) and
-    // could carry stale bytes from a prior character if that hook never
-    // armed this particular node (e.g. it hit its own IMG-override/slot4
-    // early-return and skipped the stash write).
+    // Validate the continuation bytes: WordWrapHook_UTF8 may have skipped
+    // the stash write for this node, leaving stale bytes.
     bool contOk = true;
     for (int i = 1; i < seqLen; i++) {
         if (!ObCJKIsUtf8Continuation(node[4 + i])) { contOk = false; break; }
@@ -472,8 +420,7 @@ static void __cdecl ObCJKPathCCheckUtf8(BYTE* node)
     g_pcIsCJKUtf8 = true;
 }
 
-// Byte-for-byte identical replay to DBCS's ObCJKPathCGlyphHook (same hook VA,
-// same 0x576CD1-0x576CE9 native gap).
+// Same native replay as DBCS's ObCJKPathCGlyphHook (gap 0x576CD1-0x576CE9).
 static __declspec(naked) void ObCJKPathCGlyphHookUtf8()
 {
     __asm {

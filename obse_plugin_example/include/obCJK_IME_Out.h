@@ -71,14 +71,9 @@ static void InjectIntoTextEdit(const char* text, DWORD byteCount)
 }
 
 // Strips Tab / Windows-illegal filename symbols / control bytes from an
-// already-encoded buffer (Big5/GBK/SJIS/Korean or UTF-8) without splitting a
-// multi-byte sequence apart — a DBCS trail byte or UTF-8 continuation byte
-// can land on the same numeric value as one of these ASCII symbols (e.g.
-// Big5/GBK trail bytes span 0x40-0xFE, which covers '\' 0x5C and '|' 0x7C),
-// so a raw per-byte strip would tear a CJK character in half and corrupt
-// everything after it. Defense-in-depth for the paste-into-game step: keeps
-// bad bytes out even if something upstream (clipboard paste into the Python
-// entry, a hand-edited result file, etc.) let them through.
+// encoded buffer (DBCS or UTF-8) before injection. Only single-byte
+// characters are dropped; multi-byte sequences are skipped whole, since a
+// DBCS trail byte can equal '\' (0x5C) or '|' (0x7C).
 static DWORD ObCJKImeOutStripForbidden(char* buf, DWORD len, ObCJKCodePage cp)
 {
     DWORD outLen = 0;
@@ -125,7 +120,8 @@ static void ObCJKImePerFrame(ObCJKCodePage cp, bool imeKeyDown, bool& cursorRele
                                    OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
         bool fileOpened = (hFile != INVALID_HANDLE_VALUE);
         if (fileOpened) {
-            ReadFile(hFile, g_pendingInsert, sizeof(g_pendingInsert) - 1, &bytesRead, NULL);
+            if (!ReadFile(hFile, g_pendingInsert, sizeof(g_pendingInsert) - 1, &bytesRead, NULL))
+                bytesRead = 0;  // C6031: failed read = empty result
             bytesRead = ObCJKImeOutStripForbidden(g_pendingInsert, bytesRead, cp);
             g_pendingInsert[bytesRead] = '\0';
             CloseHandle(hFile);
@@ -154,7 +150,7 @@ static void ObCJKImePerFrame(ObCJKCodePage cp, bool imeKeyDown, bool& cursorRele
             imeFile = k_imeInputPy;
 
         if (!imeFile) {
-            _WARNING("IME input not found (%s, %s)", k_imeInputExe, k_imeInputPy);
+            _WARNING("obCJK:IME_Out:PerFrame: IME input not found (%s, %s)", k_imeInputExe, k_imeInputPy);
         } else {
             SHELLEXECUTEINFOA sei = {};
             sei.cbSize       = sizeof(sei);

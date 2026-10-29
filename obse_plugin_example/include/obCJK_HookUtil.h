@@ -1,6 +1,5 @@
 #pragma once
 // Generic x86 hotpatch/trampoline utilities for hooking Oblivion.exe directly.
-// See Hook內容與規範.md.
 #include <windows.h>
 #include "common/IDebugLog.h"
 
@@ -25,10 +24,11 @@ static int ObCJKModRMExtra(const BYTE* modrm_ptr)
     return extra;
 }
 
-// Returns byte length of a single x86 instruction. Uses proper ModRM decoding
-// to avoid splitting multi-byte memory-access instructions mid-way — a fixed
-// byte-count guess corrupts the trampoline if the target uses a memory-operand
-// form (e.g. lea, mov r,[mem], movzx r,[mem]) instead of reg-to-reg.
+// Returns byte length of a single x86 instruction, with ModRM/SIB/disp
+// decoding so memory-operand forms aren't split mid-instruction.
+// Fix: each case below that was missing (mov r8,imm8; FF group; x87; test;
+// cmp al,imm8) fell through to `return 1`, split a hooked instruction and
+// corrupted that hook's trampoline.
 static int ObCJKGetInstrLen(const BYTE* p)
 {
     BYTE op = p[0];
@@ -37,25 +37,11 @@ static int ObCJKGetInstrLen(const BYTE* p)
     if (op == 0x68) return 5;                              // push imm32
     if (op == 0x6A) return 2;                              // push imm8
     if (op >= 0xB8 && op <= 0xBF) return 5;               // mov r32, imm32
-    if (op >= 0xB0 && op <= 0xB7) return 2;               // mov r8, imm8 (no ModRM) —
-    // needed by obCJK_SaveReturnFixHook.h's hook at sub_465130 VA 0x465841
-    // (`mov al, 1`); without this case it fell through to the default
-    // `return 1` below and split the instruction (the stray immediate byte
-    // was then misparsed as a second opcode).
-    if (op == 0xFF) return 2 + ObCJKModRMExtra(p + 1);    // Group 5 (INC/DEC/CALL/JMP/PUSH
-    // r/m32) — every reg-field variant is ModRM-only, no immediate. Needed by
-    // obCJK_SaveWideOpenHook.h's hook at sub_982440's entry (`ff 74 24 0C` =
-    // push [esp+0Ch]); without this case it fell through to the default
-    // `return 1` below and split the instruction.
+    if (op >= 0xB0 && op <= 0xB7) return 2;               // mov r8, imm8 (no ModRM)
+    if (op == 0xFF) return 2 + ObCJKModRMExtra(p + 1);    // Group 5 INC/DEC/CALL/JMP/PUSH r/m32, no immediate
     if (op == 0x0F && p[1] >= 0xB6 && p[1] <= 0xB7)       // movzx r32, r/m8|r/m16
         return 3 + ObCJKModRMExtra(p + 2);
-    if (op >= 0xD8 && op <= 0xDF) {                        // x87 FPU (fld/fild/fadd/
-    // fsubp/fstp/etc.) — needed by obCJK_GlyphHook.h's PathA line-height
-    // hook target (VA 0x5768c4, sub_576670's per-line Y-cursor step is
-    // pure FPU arithmetic). Register-to-register form (2nd byte >= 0xC0,
-    // e.g. DE E9 = fsubp st(1),st) is always 2 bytes total; memory-operand
-    // form reuses the same ModRM/SIB/disp decoding as every other case
-    // here. See PathA主要文字顯示.md 第25節.
+    if (op >= 0xD8 && op <= 0xDF) {                        // x87 FPU: reg form (2nd byte >= 0xC0) is 2 bytes
         BYTE modrm2 = p[1];
         if (modrm2 >= 0xC0) return 2;
         return 2 + ObCJKModRMExtra(p + 1);
@@ -64,11 +50,7 @@ static int ObCJKGetInstrLen(const BYTE* p)
         return 2 + ObCJKModRMExtra(p + 1);
     if (op == 0x8A || op == 0x88)                          // mov r8, r/m8 / r/m8, r8
         return 2 + ObCJKModRMExtra(p + 1);
-    if (op == 0x84 || op == 0x85)                          // test r/m8,r8 / r/m32,r32 —
-    // needed by obCJK_DeleteFileWShim.h's diagnostic hook at sub_453480+0x1A
-    // (VA 0x45349A, `85 f6` = `test esi,esi`); without this case it fell
-    // through to the default `return 1` below and split the instruction,
-    // same failure mode documented for the 0x3C/0xB0-B7 cases above.
+    if (op == 0x84 || op == 0x85)                          // test r/m8,r8 / r/m32,r32
         return 2 + ObCJKModRMExtra(p + 1);
     if (op == 0x80)                                        // alu r/m8,  imm8
         return 3 + ObCJKModRMExtra(p + 1);
@@ -76,14 +58,8 @@ static int ObCJKGetInstrLen(const BYTE* p)
         return 3 + ObCJKModRMExtra(p + 1);
     if (op == 0x81)                                        // alu r/m32, imm32
         return 6 + ObCJKModRMExtra(p + 1);
-    if (op == 0x3C) return 2;                              // CMP AL, imm8 (accumulator
-    // form, no ModRM) — needed by obCJK_WordWrapHook.h's TrailByteGuard hook
-    // (VA 0x576226 sits right on top of `cmp al,7Eh`); without this case it
-    // fell through to the default `return 1` below and split the
-    // instruction, see that hook's header comment for the corrupted-copyLen
-    // trace this caused.
-    // ADD/OR/ADC/SBB/AND/SUB/XOR/CMP r/m32,r32 and r32,r/m32 — same ModRM
-    // encoding as mov/lea above.
+    if (op == 0x3C) return 2;                              // cmp al, imm8 (no ModRM)
+    // ADD/OR/ADC/SBB/AND/SUB/XOR/CMP r/m,r and r,r/m — ModRM encoded.
     switch (op) {
     case 0x00: case 0x01: case 0x02: case 0x03:
     case 0x08: case 0x09: case 0x0A: case 0x0B:
@@ -95,8 +71,8 @@ static int ObCJKGetInstrLen(const BYTE* p)
     case 0x38: case 0x39: case 0x3A: case 0x3B:
         return 2 + ObCJKModRMExtra(p + 1);
     }
-    if (op == 0xEB) return 2;                // jmp rel8 — same reasoning as above,
-    if (op >= 0x70 && op <= 0x7F) return 2;  // as is Jcc rel8.
+    if (op == 0xEB) return 2;                // jmp rel8
+    if (op >= 0x70 && op <= 0x7F) return 2;  // Jcc rel8
     if (op == 0xF6 || op == 0xF7) {          // Grp3: TEST/NOT/NEG/MUL/IMUL/DIV/IDIV r/m
         // reg field (ModRM bits 3-5) selects the sub-opcode: only TEST (reg 0/1)
         // carries an immediate — NOT/NEG/MUL/IMUL/DIV/IDIV (reg 2-7) do not.
@@ -149,24 +125,18 @@ static bool ObCJKInstallHook(BYTE* target, void* hookFn, BYTE** tramp, const cha
     return true;
 }
 
-// Resolves an IDA-derived VA to the actual runtime address inside `mod`.
-// `knownPreferredBase` must be supplied by the caller (verified independently,
-// e.g. from the on-disk file's own IMAGE_OPTIONAL_HEADER.ImageBase) — do not
-// re-derive it by reading mod's live in-memory ImageBase field. See
-// Hook內容與規範.md「二、」for why (MenuQue's custom Submodule loader
-// rewrites that field, which silently broke this for Submodule.Game.dll).
+// Converts an IDA VA to the runtime address inside `mod`, using the caller's
+// known preferred base (the file's ImageBase).
+// Fix: don't read mod's in-memory ImageBase — MenuQue's Submodule loader
+// rewrites it, which broke this for Submodule.Game.dll.
 static BYTE* ObCJKModuleRvaToAddr(HMODULE mod, DWORD idaVA, DWORD knownPreferredBase)
 {
     return (BYTE*)mod + (idaVA - knownPreferredBase);
 }
 
-// Retargets an existing 5-byte `call rel32` (E8 xx xx xx xx) instruction to
-// `newTarget` in place, without touching any other byte — no trampoline
-// needed since we're not altering the callee's own prologue, only redirecting
-// one specific call site to a different function with a matching signature.
-// Caller must have already verified via get_bytes that `callSiteAddr` really
-// is the start of a genuine E8 call (this only re-checks the opcode byte as
-// a last-chance guard, it does not re-derive instruction boundaries).
+// Retargets an existing 5-byte `call rel32` (E8) to `newTarget` in place;
+// no trampoline. The caller must ensure `callSiteAddr` is the start of an E8
+// call; only the opcode byte is re-checked here.
 static bool ObCJKPatchCallTarget(BYTE* callSiteAddr, void* newTarget, const char* tag)
 {
     if (callSiteAddr[0] != 0xE8) {

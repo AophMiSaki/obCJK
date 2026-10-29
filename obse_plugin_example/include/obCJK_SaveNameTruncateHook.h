@@ -1,29 +1,14 @@
 #pragma once
-// Fix for the manual-save "shows success but writes no file" bug (see memory
-// obcjk_bug_save_maxpath). This is the SECOND hook point tried — the first
-// (hooking sub_465130's entry to truncate its name argument) was installed
-// and confirmed harmless but ineffective: its diagnostic hit-log never fired
-// even though the bug still reproduced in-game. Root cause traced further
-// via IDA on 2026-07-19: the pause-menu Save dialog's "use/overwrite an
-// existing save slot" branch (confirmed via sub_5D3390, one of sub_465130's
-// 6 callers) passes name=NULL into sub_465130 and instead makes
-// sub_45F2E0 reuse a path already cached at some other object's +0x60
-// field — completely bypassing the name argument sub_465130's hook could
-// see. Patching every possible upstream branch individually is fragile;
-// this hook instead targets the one point they all provably converge on.
+// Fix: manual save "shows success but writes no file" for long (CJK) save
+// names. sub_430970 (VA 0x00430970), the generic file-stream-open
+// constructor every save path (console, quicksave, autosave, save dialog)
+// ends up calling with the full path, silently clears the path to an empty
+// string when strlen reaches MAX_PATH (260).
 //
-// sub_430970 (VA 0x00430970) is a generic file-stream-open constructor
-// (14 call sites across the exe — textures, BSAs, generic file I/O, not
-// save-specific) that every Save path — console, quicksave, autosave, and
-// both sub_45F2E0 branches — ultimately calls with the fully-built path.
-// Its own disassembly (confirmed via get_bytes/disasm) computes strlen(path)
-// and silently clears the destination buffer to an empty string whenever
-// that length reaches MAX_PATH (260) — no error, no failure flag; see
-// memory's Bug點1 for the full trace. Because sub_430970 is shared by many
-// unrelated file operations, this hook only acts when the incoming path
-// ends in ".ess" (case-insensitive) — the same extension check sub_45F2E0
-// itself uses to recognize a save file — so no other path type is ever
-// touched.
+// Hooked here rather than at sub_465130 because the save dialog's overwrite
+// branch passes name=NULL and reuses a cached path. sub_430970 is shared by
+// unrelated file I/O, so only paths ending in ".ess" are touched: they are
+// truncated on a character boundary to kObCJKSavePathCap.
 #include <windows.h>
 #include <string.h>
 #include "common/IDebugLog.h"
@@ -31,15 +16,8 @@
 #include "obCJK_Encoding.h"
 #include "obCJK_SaveDiag.h"  // SaveDiagEnable
 
-// Walks `s` (length `len`, not assumed NUL-terminated at `len`) from the
-// start as a sequence of single-byte / DBCS-pair (or UTF-8 multi-byte, under
-// kCP_UTF8) characters — same well-formed-input assumption every other byte
-// classifier in this project makes (e.g. ObCJKLootMenuEndsInOrphanLead).
-// Returns the largest prefix length <= maxLen that lands on a character
-// boundary, so a multi-byte character is never split mid-sequence. Safe to
-// run over the folder-path prefix too: drive letters/colons/backslashes/
-// ASCII directory names are never DBCS lead bytes and are always <=0x7F
-// under UTF-8, so they're always treated as 1-byte characters here.
+// Largest prefix length <= maxLen of `s` (length `len`) that ends on a
+// character boundary (DBCS pair or UTF-8 sequence), walking from the start.
 static size_t ObCJKSafeTruncateLenExplicit(const char* s, size_t len, size_t maxLen)
 {
     if (len <= maxLen) return len;
@@ -68,19 +46,11 @@ static DWORD  g_savePathDiagHits = 0;
 // Safety margin under sub_430970's own MAX_PATH(260) cliff.
 static const size_t kObCJKSavePathCap = 255;
 
-// Diagnostic-only cap: this branch (path ends in ".ess") should only ever be
-// reached once per actual save attempt, so a generous cap is just a safety
-// net against something unexpectedly calling this in a loop — not a normal
-// operating limit like the 300-call diagnostic caps elsewhere in this
-// project. Gated behind SaveDiagEnable (obCJK_SaveDiag.h) — this confirmed
-// the hook point is reached during a real manual save (see memory
-// obcjk_bug_save_maxpath's "第二版" section), so it no longer needs to be
-// unconditional; it only prints when SaveDiagEnable=1.
+// Debug log line cap (SaveDiagEnable=1 only).
 static const DWORD kObCJKSavePathDiagCap = 200;
 
-// __cdecl, called from the naked hook below with (path) pushed. Returns the
-// pointer sub_430970's replayed prologue should treat as its path argument —
-// unchanged unless the path both ends in ".ess" AND is over the cap.
+// Returns the path sub_430970 should use: unchanged unless it ends in ".ess"
+// and is longer than the cap.
 static const char* __cdecl ObCJKSavePathFixCheck(const char* path)
 {
     if (!path) return path;
@@ -115,13 +85,9 @@ static const char* __cdecl ObCJKSavePathFixCheck(const char* path)
     return g_savePathFixBuf;
 }
 
-// thiscall entry: ecx=this (the file-stream object being constructed,
-// unused here), [esp+4]=arg_0(path, char*), [esp+8]=arg_4(mode, int),
-// [esp+0xC]=arg_8(flags, int) — exactly the CPU state at sub_430970's real
-// first instruction, since this hook patches the function's own entry VA
-// (nothing has touched the stack yet). Overwrites the path slot in place so
-// the trampoline's replayed original prologue — and the strlen/MAX_PATH
-// check right after it — reads the (possibly truncated) pointer.
+// thiscall entry: ecx=this (unused), [esp+4]=path, [esp+8]=mode,
+// [esp+0xC]=flags. Overwrites the path slot so the original function reads
+// the (possibly truncated) pointer.
 static __declspec(naked) void ObCJKSavePathFixHook()
 {
     __asm {
@@ -144,15 +110,8 @@ static void ObCJKInstallSavePathFixHook()
 }
 
 // ---------------------------------------------------------------------
-// ★2026-07-19 temporary diagnostic-only hook, sub_465130 entry — purely
-// observational (never modifies anything), added alongside the sub_430970
-// hook above to empirically settle whether sub_465130 (the "common Save
-// entry point" from the earlier, reverted attempt) is even reached at all
-// during the user's actual manual-save action. Two rounds of pure static
-// call-graph reasoning have each turned out wrong in a different way (see
-// memory obcjk_bug_save_maxpath's "第二版" section), so this logs every
-// call (capped, gated behind SaveDiagEnable — obCJK_SaveDiag.h) instead of
-// guessing further from decompile output alone.
+// Diagnostic hook at sub_465130 entry: logs a2/name/a4 of each call
+// (SaveDiagEnable=1, max 200 lines). Read-only.
 static BYTE*  g_saveEntryDiagTramp = nullptr;
 static DWORD  g_saveEntryDiagHits  = 0;
 static const DWORD kObCJKSaveEntryDiagCap = 200;
@@ -166,9 +125,7 @@ static void __cdecl ObCJKSaveEntryDiagLog(int a2, const char* name, int a4)
 }
 
 // thiscall entry: ecx=this (unused), [esp+4]=a2(int), [esp+8]=name(char*),
-// [esp+0xC]=a4(int) — same layout established for the sub_465130 hook in
-// the previous (reverted) attempt. Read-only: nothing is written back to
-// the stack, original arguments flow through untouched.
+// [esp+0xC]=a4(int). Original arguments flow through untouched.
 static __declspec(naked) void ObCJKSaveEntryDiagHook()
 {
     __asm {

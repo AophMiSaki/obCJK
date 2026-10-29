@@ -121,6 +121,7 @@
     <ClInclude Include="include\obCJK_GlyphHook.h" />
     <ClInclude Include="include\obCJK_LineBreakRule.h" />
     <ClInclude Include="include\obCJK_LineBreakHook.h" />
+    <ClInclude Include="include\obCJK_LineFloorHook.h" />
     <ClInclude Include="include\obCJK_TexSwap.h" />
     <ClInclude Include="include\obCJK_TexUpload.h" />
     <ClInclude Include="include\obCJK_LootMenuTrailByteFixHook.h" />

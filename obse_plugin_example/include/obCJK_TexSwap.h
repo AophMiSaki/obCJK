@@ -1,30 +1,25 @@
 #pragma once
-// Font-texture swap-at-load hook: single 4-byte rel32 patch at VA 0x5749BB
+// Font-texture swap-at-load hook: a 4-byte rel32 patch at VA 0x5749BB
 // (sub_5744E0's call to sub_704800) swaps the first .tex page's NiPixelData
-// for an enlarged copy (native pixels + reserved CJK region below), letting
-// the engine's own CreateTexture path build CJK glyphs into the same native
-// texture. Full insertion-point derivation, 2026-07-10 sizing/Plan-B
-// decisions, and NiPixelData/FontInfo field offsets:
-// D3D替換文字.md.
+// for an enlarged copy (native pixels + reserved CJK region below), so the
+// engine builds one native texture with room for CJK glyphs, which
+// obCJK_TexUpload.h fills on demand.
 
 #include <windows.h>
 #include "common/IDebugLog.h"
 #include "obCJK_GlyphAtlas.h"
 #include "obCJK_Path.h"  // k_iniMain
-#include "obCJK_NorthernUICompat.h"  // ObCJKNorthernUIResolveByOwnPath — see fontID0 fallback below
+#include "obCJK_NorthernUICompat.h"  // ObCJKNorthernUIResolveByOwnPath
 
 // --- Native addresses (Oblivion.exe 1.2.416) -------------------------------
-// Call site inside sub_5744E0's per-page .tex loop. Byte at +0 must be E8;
-// rel32 operand lives at +1..+4. Its return address 0x5749C0 is the exact
-// fingerprint obtc.dll matched via SEH stack peeking — we patch the call
-// operand directly instead (single 4-byte data patch, no trampoline, no
-// ObCJKGetInstrLen involvement).
+// Call site inside sub_5744E0's per-page .tex loop: E8 + rel32; only the
+// rel32 operand is patched (no trampoline).
 static const DWORD kVA_TexSwapCallSite  = 0x005749BB;
 static const DWORD kVA_Sub704800        = 0x00704800; // NiTexturingProperty ctor (builds NiSourceTexture via sub_701FC0)
 static const DWORD kVA_NiPixelDataCtor  = 0x0070E560; // __thiscall (this, W, H, NiPixelFormat*, mipLevels, numFaces), retn 14h
 static const DWORD kVA_FormHeapAllocate = 0x00401F00; // void* __cdecl (UInt32 size) — xOBSE GameAPI.cpp:111
 
-// --- NiPixelData field offsets (D3D替換文字.md「三、」, sub_70E560 完整解出) ---
+// --- NiPixelData field offsets (from sub_70E560) ---
 static const DWORD kNiPD_Format  = 0x08; // embedded 0x44-byte NiPixelFormat copy
 static const DWORD kNiPD_Buffer  = 0x50; // BYTE* raw pixels (same block as the arrays below)
 static const DWORD kNiPD_Widths  = 0x54; // DWORD* per-mip widths
@@ -38,18 +33,18 @@ static const DWORD kFontInfo_ID     = 0x08;  // UInt16, 1-based engine font ID (
 static const DWORD kFontInfo_FntBuf = 0x38;  // void*, 0x3928-byte .fnt file buffer
 static const DWORD kFntBuf_Entries  = 0x128; // buffer+0x128: 256 × 56-byte glyph entries (font_base+byte*56+0x128)
 
-static const int kObCJKTexSwapBaseSize = 2048; // fixed default (user decision 2026-07-10)
+static const int kObCJKTexSwapBaseSize = 2048; // default enlarged size
 static const int kObCJKTexSwapMaxSize  = 4096; // overflow fuse — 64MB RGBA per font, warn loudly
 
 static bool  g_texSwapEnabled      = true;
 static void* g_texSwapCont         = (void*)kVA_Sub704800; // stub's continuation target
 
-// Per-fontID state for the reserved-but-lazily-filled CJK region inside the
-// swapped (enlarged) native font texture. Populated in ObCJKTexSwapCheckImpl
-// once a font's texture is actually enlarged, with a fresh shelf-pack cursor.
-// Consumed by obCJK_TexUpload.h's Plan B on-demand placement — see that
-// file's top comment. fontID here is 0-based (engineID - 1), matching
-// obCJK_GlyphAtlas.h's convention.
+// Per-fontID (0-based) CJK region inside the enlarged native texture, set up
+// by ObCJKTexSwapCheckImpl and filled by TexUpload's shelf-pack cursor.
+// Fix: the cursor never rewinds on font hot-reload — rewinding let new
+// glyphs overwrite rects still referenced by UI text that isn't redrawn
+// every frame, showing the wrong character. The region is consumed
+// monotonically; when full, new glyphs stay blank (overflowWarned).
 struct ObCJKTexSwapRegion {
     bool active;
     int  texSize;
@@ -59,13 +54,8 @@ struct ObCJKTexSwapRegion {
 };
 static ObCJKTexSwapRegion g_texSwapRegion[kObCJKMaxFontID] = {};
 
-// g_texSwapEnabled gate here too (not just in ObCJKTexSwapCheckImpl): once
-// ObCJKTexSwapReloadEnableFlag() below flips it false at runtime, this must
-// stop handing out the region so obCJK_TexUpload.h's PlaceGlyphImpl treats
-// EVERY fontID as "never swapped" for any *new* placement — plain
-// region.active alone can't express that, because a font that was already
-// swapped earlier this session keeps region.active==true forever (nothing
-// ever clears it back to false).
+// Returns the region for new glyph placement, or nullptr. Also gated on
+// g_texSwapEnabled, since region.active is never cleared once set.
 static ObCJKTexSwapRegion* ObCJKTexSwapGetRegion(int fontID0)
 {
     if (!g_texSwapEnabled) return nullptr;
@@ -73,21 +63,10 @@ static ObCJKTexSwapRegion* ObCJKTexSwapGetRegion(int fontID0)
     return g_texSwapRegion[fontID0].active ? &g_texSwapRegion[fontID0] : nullptr;
 }
 
-// Live "turn off" for the TexSwapEnable debug switch (obCJK_iniEdit.py's
-// "一鍵關閉CJK顯示" checkbox): re-reads ini after the editor closes and, if
-// the user flipped it to 0, (1) clears g_texSwapEnabled so
-// ObCJKTexSwapGetRegion() above stops handing out regions for any *new*
-// glyph placement, and (2) calls ObCJKGlyphAtlas_Reset() so every already-
-// cached ObCJKGlyphEntry (texSwapReady==true from earlier this session) gets
-// freed and re-placed from scratch on next draw — otherwise
-// ObCJKTexUpload_PlaceGlyphImpl's "already placed by a previous call here"
-// early-out (obCJK_TexUpload.h:90) would keep showing every character the
-// player has already seen this session as CJK forever, since that check
-// never looks at g_texSwapEnabled. One-directional by design — if
-// TexSwapEnable was already 0 at plugin load, ObCJKInstallTexSwapHook()
-// never patched the call site at all, so there is no live path back to 1
-// without re-doing that patch; this function only ever sets the flag false,
-// never true. Called from main.cpp's editor-close handler.
+// Live turn-off for ini TexSwapEnable, called from main.cpp's editor-close
+// handler: if it is now 0, clears g_texSwapEnabled and resets the glyph
+// cache so already-placed CJK glyphs are dropped too. One-directional: it
+// never turns TexSwap back on (that needs the load-time patch).
 static void ObCJKTexSwapReloadEnableFlag()
 {
     if (g_texSwapEnabled &&
@@ -98,29 +77,9 @@ static void ObCJKTexSwapReloadEnableFlag()
     }
 }
 
-// [2026-07-17] There used to be an ObCJKTexSwapResetRegions() here that
-// rewound every active region's shelf-pack cursor back to its starting row
-// on a font-settings hot-reload, so repeated in-session reloads would reuse
-// the same swapped-texture space instead of growing forever. Removed: some
-// already-visible UI text (e.g. the main menu's static bottom hotkey row)
-// isn't redrawn every frame, so its baked UV keeps pointing at its old rect
-// in the shared native font texture even after ObCJKGlyphAtlas_Reset()
-// invalidates every ObCJKGlyphEntry. Rewinding the cursor let a freshly
-// placed (but unrelated) glyph land in that same rect, flipping the stale,
-// never-redrawn text to a different — still valid-looking, but wrong — CJK
-// glyph (obcjk_refresh_bug_001.png). The cursor now only ever advances
-// forward (see ObCJKTexUpload_PlaceGlyphImpl in obCJK_TexUpload.h), so an
-// old rect is never overwritten by a new placement. Trade-off: the
-// fixed-size reserved region is consumed monotonically across repeated
-// in-session font reloads instead of being recycled — already handled
-// gracefully by TexUpload's overflow fuse (that file's overflowWarned path
-// just leaves further new glyphs blank until the next level/texture reload).
-
-// The actual per-call decision + swap. Returns the NiPixelData* that
-// sub_704800 should consume: the original (pass through) or our enlarged
-// replacement. Called on EVERY font page's texture build; only the first
-// page per FontInfo is swapped (the UI text pipeline only ever binds
-// texture array index 0 — 多張texture page機制查明).
+// Returns the NiPixelData* sub_704800 should consume: the original or the
+// enlarged replacement. Called for every font page; only the first page per
+// FontInfo is swapped (the UI text pipeline only binds texture index 0).
 static void* ObCJKTexSwapCheckImpl(BYTE* pixelData, BYTE* fontInfo)
 {
     // Font loads are strictly sequential on the main thread, so "same
@@ -142,13 +101,8 @@ static void* ObCJKTexSwapCheckImpl(BYTE* pixelData, BYTE* fontInfo)
 
     int fontID0 = (int)engineID - 1;  // FontInfo::ID is 1-based; atlas slots are 0-based
     if (fontID0 < 0 || fontID0 >= kObCJKMaxFontID) {
-        // Not a native slot ID. This hook fires *during* font construction
-        // (mid .tex-file read), before FontShim finishes writing its own
-        // rawID/broadcast into this FontInfo — see
-        // ObCJKNorthernUIResolveByOwnPath's comment in
-        // obCJK_NorthernUICompat.h. So unlike Path A/B/C's draw-time lookup
-        // (ObCJKFontIDFromInfoPtr), we can't use the rawID-based bridge here
-        // and must resolve via the FontInfo's own path field instead.
+        // Not a native slot ID: resolve NorthernUI fonts by the FontInfo's own
+        // path (rawID isn't written yet during construction).
         int roleIndex = ObCJKNorthernUIResolveByOwnPath(fontInfo);
         if (roleIndex >= 0) {
             fontID0 = kObCJKMaxFontIDNative + roleIndex;
@@ -193,8 +147,7 @@ static void* ObCJKTexSwapCheckImpl(BYTE* pixelData, BYTE* fontInfo)
     for (DWORD y = 0; y < oldH; y++)
         memcpy(newBuf + (DWORD)y * texSize * 4, oldBuf + (DWORD)y * oldW * 4, oldW * 4);
 
-    // Reserve the CJK region for Plan B dynamic upload (obCJK_TexUpload.h) —
-    // fresh shelf-pack cursor, no load-time pre-bake anymore.
+    // Reserve the CJK region for TexUpload, fresh shelf-pack cursor.
     ObCJKTexSwapRegion& region = g_texSwapRegion[fontID0];
     region.active        = true;
     region.texSize        = texSize;
@@ -227,15 +180,12 @@ static void* ObCJKTexSwapCheckImpl(BYTE* pixelData, BYTE* fontInfo)
         _WARNING("obCJK:TexSwap: FontInfo+0x38 fnt buffer is NULL at swap time — native UVs NOT rescaled, ASCII will look wrong (engineID=%u)", engineID);
     }
 
-    // Original NiPixelData orphaned from here on — accepted one-time leak
-    // (D3D替換文字.md「二、」, user decision 2026-07-10).
+    // The original NiPixelData is orphaned (accepted one-time leak per font load).
     return newPd;
 }
 
-// SEH firewall: any unexpected fault inside the swap logic (a wrong
-// assumption about registers/offsets) degrades to "pass the native
-// pixelData through untouched" instead of crashing font loading. Kept free
-// of C++ objects so __try is legal here; all real work lives in Impl.
+// SEH guard: any fault in the swap logic passes the native pixelData through
+// instead of crashing font loading. No C++ objects here, so __try is legal.
 static void* __cdecl ObCJKTexSwapCheck(BYTE* pixelData, BYTE* fontInfo)
 {
     void* result = pixelData;
@@ -250,8 +200,7 @@ static void* __cdecl ObCJKTexSwapCheck(BYTE* pixelData, BYTE* fontInfo)
 
 // Replaces `call sub_704800` at 0x5749BB. On entry: [esp]=return address
 // (0x5749C0), [esp+4]=NiPixelData* argument, ecx=the 0x30-byte object
-// sub_704800 constructs into, esi=FontInfo* (sub_5744E0 keeps `this` in esi;
-// diag log above verifies this on first run).
+// sub_704800 constructs into, esi=FontInfo* (sub_5744E0 keeps `this` in esi).
 static __declspec(naked) void ObCJKTexSwapStub()
 {
     __asm {

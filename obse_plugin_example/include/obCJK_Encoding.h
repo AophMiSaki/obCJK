@@ -11,7 +11,7 @@ enum ObCJKCodePage {
 
 #include "obcjk_globalVariable.h"
 
-static ObCJKCodePage ObCJKCodePageFromString(const char* s, ObCJKCodePage def = kCP_BIG5)
+static ObCJKCodePage ObCJKCodePageFromString(const char* s, ObCJKCodePage def = kCP_UTF8)
 {
     if (!s || !s[0]) return def;
     if (_stricmp(s, "big5")      == 0 || _stricmp(s, "950") == 0) return kCP_BIG5;
@@ -45,9 +45,7 @@ static bool ObCJKIsTrailByte(BYTE b, ObCJKCodePage cp)
     return false;
 }
 
-// UTF-8為變長編碼，介面語意與DBCS的lead/trail true/false判斷不同：
-// 回答「這個序列共幾個byte」而非「這個byte是不是lead/trail」。continuation byte範圍(0x80-0xBF)
-// 與各長度lead byte範圍完全不重疊，故不需要DBCS奇偶游程消歧義法。
+// UTF-8 sequence length from its lead byte (1-4); 0 = continuation or invalid lead.
 static int ObCJKUtf8SeqLen(BYTE b)
 {
     if (b <= 0x7F) return 1;
@@ -62,12 +60,8 @@ static inline bool ObCJKIsUtf8Continuation(BYTE b)
     return b >= 0x80 && b <= 0xBF;
 }
 
-// UTF-8 counterpart of ObCJKIsAsciiCandidate (below) — that function checks
-// "not a lead byte under g_activeCodePage's DBCS table", which is the wrong
-// question for UTF-8 (ObCJKIsLeadByte has no UTF-8 case and would return
-// false for every byte, wrongly admitting lead/continuation bytes as ASCII
-// candidates). UTF-8's ASCII range is exactly 0x00-0x7F by construction —
-// no table lookup needed. 
+// UTF-8 version of ObCJKIsAsciiCandidate: non-zero byte <= 0x7F.
+// (ObCJKIsAsciiCandidate is DBCS-only; under UTF-8 it would accept every byte.)
 static inline bool ObCJKUtf8IsAsciiCandidate(BYTE b)
 {
     return b != 0 && b <= 0x7F;
@@ -100,13 +94,9 @@ static inline bool ObCJKIsAsciiCandidate(BYTE b)
     return b != 0 && !ObCJKIsLeadByte(b, g_activeCodePage);
 }
 
-// Single-byte forbidden-char predicate shared by both IME paths (native
-// obCJK_IME_In.h edit control and external obCJK_IME_Out.h Python window):
-// Tab / control bytes (Backspace excluded so editing still works) plus the
-// 9 characters Windows forbids in file names. Only meaningful when called on
-// a byte that is NOT part of a multi-byte lead/trail or UTF-8 sequence —
-// callers must establish that first (see ObCJKIsLeadByte/ObCJKUtf8SeqLen)
-// so a DBCS trail byte or UTF-8 continuation byte is never tested here.
+// Forbidden single-byte char for both IME paths: control bytes except
+// Backspace, plus the 9 characters Windows forbids in file names. Callers
+// must only pass bytes that are not part of a multi-byte sequence.
 static inline bool ObCJKIsForbiddenFilenameChar(BYTE ch)
 {
     if (ch == 0x08) return false;  // Backspace must stay typable

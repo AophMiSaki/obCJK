@@ -232,6 +232,11 @@ _FALLBACK_UI_TEXT: dict[str, str] = {
     "outline_mode_outline": "描邊",
     "outline_size_lbl": "邊寬",
     "outline_alpha_lbl": "邊濃度",
+    "cjk_disable": "停用全形",
+    "line_gap_lbl": "行間距：",
+    "preview_legend_cell": "字格範圍",
+    "preview_legend_gap": "行間距",
+    "preview_legend_overlap": "行重疊",
 }
 _FALLBACK_THICKNESS_OPTS = [("300 細", 300), ("400 標準", 400), ("500 適中", 500), ("700 粗體", 700)]
 _FALLBACK_CONTRAST_OPTS  = [("弱", -1), ("普通", 0), ("強烈", 1)]
@@ -409,6 +414,10 @@ PARAM_FIELDS = [
     ("spacing", 2, -999, 999),
     ("ypos",    3, -999, 999),
 ]
+
+# 行間距範圍（FontParam<N>_LineGap）。
+LINE_GAP_MIN = -10
+LINE_GAP_MAX = 10
 
 # DirectInput 掃描碼表（INI 以無前綴十六進位字串儲存，如 "43" = 0x43 = DIK_F9）
 SCAN_CODES: dict[str, int] = {
@@ -668,6 +677,83 @@ def enum_cjk_fonts(charset: int) -> list[str]:
     return sorted(found)
 
 
+class TEXTMETRICW(ctypes.Structure):
+    _fields_ = [
+        ("tmHeight",           ctypes.wintypes.LONG),
+        ("tmAscent",           ctypes.wintypes.LONG),
+        ("tmDescent",          ctypes.wintypes.LONG),
+        ("tmInternalLeading",  ctypes.wintypes.LONG),
+        ("tmExternalLeading",  ctypes.wintypes.LONG),
+        ("tmAveCharWidth",     ctypes.wintypes.LONG),
+        ("tmMaxCharWidth",     ctypes.wintypes.LONG),
+        ("tmWeight",           ctypes.wintypes.LONG),
+        ("tmOverhang",         ctypes.wintypes.LONG),
+        ("tmDigitizedAspectX", ctypes.wintypes.LONG),
+        ("tmDigitizedAspectY", ctypes.wintypes.LONG),
+        ("tmFirstChar",        ctypes.wintypes.WCHAR),
+        ("tmLastChar",         ctypes.wintypes.WCHAR),
+        ("tmDefaultChar",      ctypes.wintypes.WCHAR),
+        ("tmBreakChar",        ctypes.wintypes.WCHAR),
+        ("tmItalic",           ctypes.c_ubyte),
+        ("tmUnderlined",       ctypes.c_ubyte),
+        ("tmStruckOut",        ctypes.c_ubyte),
+        ("tmPitchAndFamily",   ctypes.c_ubyte),
+        ("tmCharSet",          ctypes.c_ubyte),
+    ]
+
+
+_font_metrics_cache: dict[tuple, tuple[int, int]] = {}
+
+
+def gdi_font_metrics(face: str, height: int, weight: int, italic: bool) -> tuple[int, int]:
+    """回傳 GDI 的 (tmAveCharWidth, tmInternalLeading)。遊戲端 LOGFONTW.lfWidth
+    （ini 字寬）以 tmAveCharWidth（lfWidth=0 時的自然平均字寬）為基準橫向縮放，
+    預覽用它算縮放比 width/avgW；tmInternalLeading 用來把 Tk 文字的頂端對齊到
+    遊戲的字格頂端（lfHeight 為負＝em 高度，不含 internal leading）。取不到回傳
+    (0, 0)，呼叫端視為不縮放、不位移。"""
+    key = (face, height, weight, italic)
+    if key in _font_metrics_cache:
+        return _font_metrics_cache[key]
+    avg = 0
+    lead = 0
+    try:
+        gdi32  = ctypes.windll.gdi32
+        user32 = ctypes.windll.user32
+        user32.GetDC.restype = ctypes.c_void_p
+        user32.ReleaseDC.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        gdi32.CreateCompatibleDC.restype = ctypes.c_void_p
+        gdi32.CreateCompatibleDC.argtypes = [ctypes.c_void_p]
+        gdi32.CreateFontIndirectW.restype = ctypes.c_void_p
+        gdi32.SelectObject.restype = ctypes.c_void_p
+        gdi32.SelectObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        gdi32.DeleteObject.argtypes = [ctypes.c_void_p]
+        gdi32.DeleteDC.argtypes = [ctypes.c_void_p]
+        gdi32.GetTextMetricsW.argtypes = [ctypes.c_void_p, ctypes.POINTER(TEXTMETRICW)]
+        lf = LOGFONTW()
+        lf.lfHeight = -abs(height)
+        lf.lfWeight = weight or 400
+        lf.lfItalic = 1 if italic else 0
+        lf.lfCharSet = 1  # DEFAULT_CHARSET
+        lf.lfFaceName = face
+        hdc_screen = user32.GetDC(None)
+        hdc = gdi32.CreateCompatibleDC(hdc_screen)
+        hfont = gdi32.CreateFontIndirectW(ctypes.byref(lf))
+        old = gdi32.SelectObject(hdc, hfont)
+        tm = TEXTMETRICW()
+        if gdi32.GetTextMetricsW(hdc, ctypes.byref(tm)):
+            avg = int(tm.tmAveCharWidth)
+            lead = int(tm.tmInternalLeading)
+        gdi32.SelectObject(hdc, old)
+        gdi32.DeleteObject(hfont)
+        gdi32.DeleteDC(hdc)
+        user32.ReleaseDC(None, hdc_screen)
+    except (OSError, ctypes.ArgumentError, ValueError):
+        avg = 0
+        lead = 0
+    _font_metrics_cache[key] = (avg, lead)
+    return avg, lead
+
+
 # ── INI 解析 ─────────────────────────────────────────────────────────────────
 
 def parse_font_param(raw: str) -> tuple[str, list[int]]:
@@ -834,8 +920,19 @@ class ModeTab(ttk.Frame):
         # "normal", or unchecking 原生 would leave them freely typable.
         self._half_widgets: list[tk.Widget] = []
         self._half_readonly_widgets: list[tk.Widget] = []
+        # 全形專用「停用全形」開關 — 對應 FontParam<engineID>_2_Disable。勾選後
+        # 全形這一列欄位全部停用，且不計入行高。
+        self._cjk_disable_var = tk.BooleanVar(value=(_get(f"{prefix}_2_Disable", "0") == "1"))
+        self._full_widgets: list[tk.Widget] = []
+        self._full_readonly_widgets: list[tk.Widget] = []
+        # 槽層級行間距（半形全形共用），範圍 -10..+10，見 LINE_GAP_MIN/LINE_GAP_MAX。
+        try:
+            _gap0 = max(LINE_GAP_MIN, min(LINE_GAP_MAX, int(_get(f"{prefix}_LineGap", "0"))))
+        except ValueError:
+            _gap0 = 0
+        self._gap_var = tk.StringVar(value=str(_gap0))
 
-        row_labels    = [tr("half"), tr("full")]
+        row_labels   = [tr("half"), tr("full")]
         ini_nums_list = [p1, p2]
         def_names     = [half_default[0], full_default[0]]
         def_nums_list = [half_default[1], full_default[1]]
@@ -870,6 +967,11 @@ class ModeTab(ttk.Frame):
                 ttk.Checkbutton(nf, text=tr("ascii_native"), variable=self._native_var,
                                 command=self._on_native_toggle
                                 ).grid(row=0, column=4, padx=(4, 0))
+            else:
+                self._full_widgets += [name_entry, apply_btn]
+                ttk.Checkbutton(nf, text=tr("cjk_disable"), variable=self._cjk_disable_var,
+                                command=self._on_native_toggle
+                                ).grid(row=0, column=4, padx=(4, 0))
 
             col = 0
             for trkey, pidx, lo, hi in PARAM_FIELDS:
@@ -879,8 +981,7 @@ class ModeTab(ttk.Frame):
                     row=param_row, column=col, padx=(4, 0))
                 spin = ttk.Spinbox(self, textvariable=var, from_=lo, to=hi, width=6)
                 spin.grid(row=param_row, column=col + 1, padx=(0, 2))
-                if i == 0:
-                    self._half_widgets.append(spin)
+                (self._half_widgets if i == 0 else self._full_widgets).append(spin)
                 col += 2
 
             col = 0
@@ -891,8 +992,7 @@ class ModeTab(ttk.Frame):
             d_box = ttk.Combobox(self, textvariable=d_var, values=DENSITY_VALUES,
                          state="readonly", width=5)
             d_box.grid(row=param_row2, column=col + 1, padx=(0, 2))
-            if i == 0:
-                self._half_readonly_widgets.append(d_box)
+            (self._half_readonly_widgets if i == 0 else self._full_readonly_widgets).append(d_box)
             col += 2
 
             t_var = tk.StringVar(value=self._th_by_val.get(ini_nums[5], self._th_labels[1]))
@@ -902,8 +1002,7 @@ class ModeTab(ttk.Frame):
             t_box = ttk.Combobox(self, textvariable=t_var, values=self._th_labels,
                          state="readonly", width=_combo_width(self._th_labels))
             t_box.grid(row=param_row2, column=col + 1, padx=(0, 2))
-            if i == 0:
-                self._half_readonly_widgets.append(t_box)
+            (self._half_readonly_widgets if i == 0 else self._full_readonly_widgets).append(t_box)
             col += 2
 
             c_var = tk.StringVar(value=self._co_by_val.get(ini_nums[6], self._co_labels[1]))
@@ -913,8 +1012,7 @@ class ModeTab(ttk.Frame):
             c_box = ttk.Combobox(self, textvariable=c_var, values=self._co_labels,
                          state="readonly", width=_combo_width(self._co_labels))
             c_box.grid(row=param_row2, column=col + 1, padx=(0, 2))
-            if i == 0:
-                self._half_readonly_widgets.append(c_box)
+            (self._half_readonly_widgets if i == 0 else self._full_readonly_widgets).append(c_box)
             col += 2
 
             # p7 = italic — [2026-07-11] repurposed from the legacy (never
@@ -924,8 +1022,7 @@ class ModeTab(ttk.Frame):
             pvars[7] = it_var
             it_box = ttk.Checkbutton(self, text=tr("italic"), variable=it_var)
             it_box.grid(row=param_row2, column=col, columnspan=2, padx=(4, 0))
-            if i == 0:
-                self._half_widgets.append(it_box)
+            (self._half_widgets if i == 0 else self._full_widgets).append(it_box)
 
         # 描邊/陰影（slot 層級，半角全角共用）：ini 鍵 <prefix>_OutlineMode
         # (0關/1陰影/2描邊)、_OutlineSize(1..3)、_OutlineAlpha(0..100)。
@@ -966,6 +1063,15 @@ class ModeTab(ttk.Frame):
                   ).grid(row=0, column=5, padx=(0, 4))
         ol_alpha_pct.grid(row=0, column=6)
 
+        # 行間距（slot 層級，半角全角共用）：ini 鍵 <prefix>_LineGap，範圍 -10..+10。
+        gap_frame = ttk.Frame(self)
+        gap_frame.grid(row=7, column=0, columnspan=20, sticky="w", pady=(6, 0))
+        ttk.Label(gap_frame, text=tr("line_gap_lbl"), anchor="e").grid(
+            row=0, column=0, padx=(4, 0))
+        ttk.Spinbox(gap_frame, textvariable=self._gap_var,
+                    from_=LINE_GAP_MIN, to=LINE_GAP_MAX, width=4
+                    ).grid(row=0, column=1, padx=(0, 8))
+
         self.columnconfigure(14, weight=1)
         self._on_native_toggle()
 
@@ -977,7 +1083,8 @@ class ModeTab(ttk.Frame):
             for pvs in self._pvars:
                 for sv in pvs.values():
                     sv.trace_add("write", _fire)
-            for ov in (self._ol_mode_var, self._ol_size_var, self._ol_alpha_var):
+            for ov in (self._ol_mode_var, self._ol_size_var, self._ol_alpha_var,
+                       self._gap_var):
                 ov.trace_add("write", _fire)
 
     def _on_native_toggle(self) -> None:
@@ -985,13 +1092,13 @@ class ModeTab(ttk.Frame):
         半形設定已經不會被obCJK_GlyphAtlas.h讀取（FontParam<N>_1_Native=1時，
         C++端的ObCJKAsciiRenderEnabledForFont()對這個fontID一律回傳false，
         直接回退到Oblivion原生bitmap字型），停用UI避免使用者誤以為欄位還有效。"""
-        native = bool(self._native_var.get())
-        normal_state   = "disabled" if native else "normal"
-        readonly_state = "disabled" if native else "readonly"
-        for w in self._half_widgets:
-            w.configure(state=normal_state)
-        for w in self._half_readonly_widgets:
-            w.configure(state=readonly_state)
+        for off, normal_ws, readonly_ws in (
+                (bool(self._native_var.get()), self._half_widgets, self._half_readonly_widgets),
+                (bool(self._cjk_disable_var.get()), self._full_widgets, self._full_readonly_widgets)):
+            for w in normal_ws:
+                w.configure(state="disabled" if off else "normal")
+            for w in readonly_ws:
+                w.configure(state="disabled" if off else "readonly")
         if self._on_param_change is not None:
             self._on_param_change()
 
@@ -1006,6 +1113,9 @@ class ModeTab(ttk.Frame):
         pvars[7].set(bool(default_nums[7]))
         if idx == 0:
             self._native_var.set(False)
+            self._on_native_toggle()
+        else:
+            self._cjk_disable_var.set(False)
             self._on_native_toggle()
 
     def set_name(self, idx: int, name: str) -> None:
@@ -1023,12 +1133,31 @@ class ModeTab(ttk.Frame):
             "name":     self._name_vars[idx].get().strip(),
             "size":     max(8, min(_int(1, 24), 72)),
             "width":    _int(0, 0),
+            "ypos":     _int(3, 0),
             "spacing":  _int(2, 0),
             "density":  _int(4, 0),
             "weight":   self._th_by_lbl.get(pvars[5].get(), 400) if 5 in pvars else 400,
             "contrast": self._co_by_lbl.get(pvars[6].get(), 0) if 6 in pvars else 0,
             "italic":   bool(pvars[7].get()) if 7 in pvars else False,
             **self._get_outline(),
+        }
+
+    def get_line_metrics(self) -> dict:
+        """行高預覽參數：half/full 為各槽字格高度（停用的槽為 None，不計入行高），
+        gap 為 -10..+10 的行間距。行高 = max(half, full) + gap，下限 1。"""
+        def _cell(idx):
+            try:
+                return max(8, min(abs(int(self._pvars[idx][1].get())), 72))
+            except (ValueError, tk.TclError, KeyError):
+                return 24
+        try:
+            gap = max(LINE_GAP_MIN, min(LINE_GAP_MAX, int(self._gap_var.get())))
+        except (ValueError, tk.TclError):
+            gap = 0
+        return {
+            "half": None if self._native_var.get() else _cell(0),
+            "full": None if self._cjk_disable_var.get() else _cell(1),
+            "gap":  gap,
         }
 
     def _get_outline(self) -> dict:
@@ -1079,6 +1208,8 @@ class ModeTab(ttk.Frame):
             f"{self._prefix}_2": build_font_param(
                 self._name_vars[1].get().strip(), self._get_nums(1)),
             f"{self._prefix}_1_Native": "1" if self._native_var.get() else "0",
+            f"{self._prefix}_2_Disable": "1" if self._cjk_disable_var.get() else "0",
+            f"{self._prefix}_LineGap": str(self.get_line_metrics()["gap"]),
         }
 
 
@@ -1492,7 +1623,7 @@ class MultiHotkeyCapture(ttk.Frame):
 # ── obCJK plugin ini [obCJK] 節的預設值 — 併入主視窗單一畫面，不再獨立分頁 ──
 
 _OBCJK_SECTION_DEFAULTS = {
-    "ActiveCodePage":    "BIG5",
+    "ActiveCodePage":    "UTF8",
     # 熱鍵：鍵盤/手把長按/手把組合鍵 3 組同時獨立生效，各自可停用，
     # 另有 AllDisabled 總開關（見 MultiHotkeyCapture）。
     "EditorHotkeyKbdCode":     "0x58",
@@ -1921,14 +2052,14 @@ class App(tk.Tk):
     def _init_active_codepage(self) -> str:
         """在建立編碼選擇 UI 之前，讀一次 ini 的 [obCJK] ActiveCodePage，決定
         開啟時預設選取哪個編碼——跟 _init_ui_language() 同樣的讀取時機，確保
-        單選鈕/內容分頁的初始值跟上次儲存時選的編碼一致，而不是永遠回到 BIG5。"""
+        單選鈕/內容分頁的初始值跟上次儲存時選的編碼一致，而不是永遠回到預設值。"""
         ini_path = (
             _OBL_DIR / "Data" / "OBSE" / "Plugins" / "obCJK" / "obCJK.ini"
             if _OBL_DIR else None
         )
         cfg = read_ini(ini_path) if ini_path else configparser.ConfigParser()
-        cp = cfg.get("obCJK", "ActiveCodePage", fallback="BIG5") if cfg.has_section("obCJK") else "BIG5"
-        return cp if cp in SELECTABLE_CP else "BIG5"
+        cp = cfg.get("obCJK", "ActiveCodePage", fallback="UTF8") if cfg.has_section("obCJK") else "UTF8"
+        return cp if cp in SELECTABLE_CP else "UTF8"
 
     def _init_ui_language(self) -> None:
         """在建立任何用到 tr() 的元件之前，讀一次 ini 的 [obCJK] UILang，設定
@@ -2820,7 +2951,9 @@ class App(tk.Tk):
         tab = self._tab_frames.get(self._tab_var.get())
         if tab not in self._SLOT_TABS:
             return
-        params = tab.get_preview_params(1)
+        lm = tab.get_line_metrics()
+        # 全形停用時改預覽半形參數（半形也是原生字型時仍用全形欄位值，只是行高不計入）。
+        params = tab.get_preview_params(0 if (lm["full"] is None and lm["half"] is not None) else 1)
         if font_name is None:
             sel = self.lb.curselection()
             font_name = self.fonts[sel[0]] if sel else params["name"]
@@ -2844,11 +2977,18 @@ class App(tk.Tk):
         tk_slant   = "italic" if params["italic"] else "roman"
         px_size    = max(8, min(params["size"], 60))
         spacing    = params["spacing"]
-        # 字寬(p0)：真正的 GDI lfWidth 會連字形本身一起橫向拉伸/壓縮，但 Tk
-        # 的 canvas text item 無法重新縮放字形（已實測 canvas.scale() 對
-        # text bbox 無效），這裡只能近似成「每字的水平步進距離」——width>0
-        # 時每字都佔滿 width px 寬的格子，0 則沿用字型量出的自然寬度。
+        # 字寬(p0)：遊戲端是 LOGFONTW.lfWidth（GDI 以該字型的平均字寬 tmAveCharWidth
+        # 為基準橫向縮放字形與 advance），不是固定步進。Tk 的 canvas text item
+        # 無法縮放字形（canvas.scale() 對 text 無效），預覽只把縮放比
+        # width/avgW 套用在每字的 advance 與字格寬度上，字形本身維持自然寬度；
+        # width=0 或量不到平均字寬時不縮放。
         width      = params["width"]
+        ypos       = params["ypos"]
+        stretch    = 1.0
+        avg_w, int_lead = gdi_font_metrics(font_name, px_size, params["weight"],
+                                           params["italic"])
+        if width > 0 and avg_w > 0:
+            stretch = width / avg_w
         sample     = PREVIEW_SAMPLE.get(self._current_cp, "AaBbCc 123")
 
         # [obCJK] BackgroundOpacity 滑塊（0=透明,100=全黑底）即時反映在預覽窗：
@@ -2880,35 +3020,69 @@ class App(tk.Tk):
         self._preview_canvas.delete("all")
         try:
             fnt    = tkfont.Font(family=font_name, size=-px_size, weight=tk_weight, slant=tk_slant)
-            line_h = fnt.metrics("linespace")
             lines  = sample.split("\n")
+            # 字格高度 = 字型高度；行高 = max(各槽字格高度) + 行間距（停用的槽
+            # 不計入），下限 1。
+            cell_h  = px_size
+            counted = [h for h in (lm["half"], lm["full"]) if h is not None]
+            pitch   = max(1, (max(counted) if counted else cell_h) + lm["gap"])
             def _advance(ch):
-                return width if width > 0 else fnt.measure(ch)
+                return max(1, round(fnt.measure(ch) * stretch))
+
+            cv = self._preview_canvas
+            C_CELL, C_CELL_LN = "#cfe3f7", "#4a90d9"
+            C_GAP,  C_GAP_LN  = "#ffd9a8", "#e08a00"
+            C_OVL,  C_OVL_LN  = "#f4a3a3", "#d33"
+            # 圖例：字格範圍 / 行間距 / 行重疊（行距為負或小於字格時）
+            lx = 6
+            for fill_c, line_c, key in ((C_CELL, C_CELL_LN, "preview_legend_cell"),
+                                        (C_GAP,  C_GAP_LN,  "preview_legend_gap"),
+                                        (C_OVL,  C_OVL_LN,  "preview_legend_overlap")):
+                cv.create_rectangle(lx, 6, lx + 12, 18, fill=fill_c, outline=line_c)
+                t = cv.create_text(lx + 16, 12, text=tr(key), anchor="w", fill="#444")
+                lx = cv.bbox(t)[2] + 14
 
             # 實際造字（ObCJKCompositeGlyphPixel）是逐字獨立合成，黑底只貼在
             # 該字自己的 GDI glyph 點陣範圍內，不會連成一整條——字距
             # （spacing）跟空白字元（GDI 通常給空白版點陣，不會造字/合成）之間
             # 都是透明縫隙。這裡逐字各畫一塊緊貼該字寬度的背景框，如實反映
             # 這個「單獨黑底」而非整塊連續黑底的行為。
-            y = 6
+            y = 28
+            overlaps = []
             for line in lines:
-                x = 6
+                x0 = 6
+                x  = x0
+                total_w = sum(_advance(ch) + spacing for ch in line)
+                if pitch > cell_h:
+                    cv.create_rectangle(x0, y + cell_h, x0 + total_w, y + pitch,
+                                        fill=C_GAP, outline=C_GAP_LN)
+                elif pitch < cell_h:
+                    overlaps.append((x0, y + pitch, x0 + total_w, y + cell_h))
                 for ch in line:
                     adv = _advance(ch)
-                    if bg_pct > 0 and not ch.isspace():
-                        self._preview_canvas.create_rectangle(
-                            x, y, x + adv, y + line_h, fill=box_color, outline=""
-                        )
+                    if bg_pct == 0:
+                        cv.create_rectangle(x, y, x + adv, y + cell_h,
+                                            fill=C_CELL, outline=C_CELL_LN)
+                    else:
+                        if not ch.isspace():
+                            cv.create_rectangle(x, y, x + adv, y + cell_h,
+                                                fill=box_color, outline="")
+                        cv.create_rectangle(x, y, x + adv, y + cell_h,
+                                            fill="", outline=C_CELL_LN)
+                    # Tk 文字頂端是含 internal leading 的 line box，遊戲字格頂端是
+                    # em 頂端：下移 int_lead 對齊；Y 偏移正值＝往上（readme）。
+                    ty = y - int_lead - ypos
                     if not ch.isspace():
                         for ox, oy in ol_offsets:
-                            self._preview_canvas.create_text(
-                                x + ox, y + oy, text=ch, font=fnt, fill=ol_color, anchor="nw"
-                            )
-                    self._preview_canvas.create_text(
-                        x, y, text=ch, font=fnt, fill=color, anchor="nw"
-                    )
+                            cv.create_text(x + ox, ty + oy, text=ch, font=fnt,
+                                           fill=ol_color, anchor="nw")
+                    cv.create_text(x, ty, text=ch, font=fnt, fill=color, anchor="nw")
                     x += adv + spacing
-                y += line_h + 2
+                y += pitch
+            # 重疊區塊最後畫，避免被下一行的字格蓋住
+            for ox1, oy1, ox2, oy2 in overlaps:
+                cv.create_rectangle(ox1, oy1, ox2, oy2, fill=C_OVL, outline=C_OVL_LN,
+                                    stipple="gray50")
         except tk.TclError:
             self._preview_canvas.create_text(6, 6, text=f"({font_name})", anchor="nw")
 
@@ -2922,7 +3096,9 @@ class App(tk.Tk):
         known_fonts_lower = {f.lower() for f in self.fonts}
         not_found = []
         for tab in self._SLOT_TABS:
-            pairs = [("全角", tab._name_vars[1].get())]
+            pairs = []
+            if not tab._cjk_disable_var.get():  # 勾了「停用全形」時全形欄位已停用，不檢查
+                pairs.append(("全角", tab._name_vars[1].get()))
             if not tab._native_var.get():  # 勾了「遊戲原生字型」時半角欄位已停用，不檢查
                 pairs.insert(0, ("半角", tab._name_vars[0].get()))
             for label, name in pairs:
